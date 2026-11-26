@@ -33,6 +33,14 @@ Six tabs
                  the page says whether the replay matches the saved log. The holdout is only
                  read: nothing here writes to it or feeds it back into agent.py.
 
+Clarifying question (LIVE TYPE and EXAMPLES; demo only)
+-----------------------------------------------------
+When a request ends and more than one product still fits, the page asks ONE question about
+the attribute (category, colour, size, brand or budget) whose answer is expected to leave the
+fewest products, e.g. "Which size: 7 · 8 · 9?". Clicking an answer adds it as words to the
+request, which is run again through a fresh agent. Only answers that this check confirms are
+offered. This lives only in this file: agent.py, evaluate.py and every score are unchanged.
+
 Nothing on screen is invented
 -----------------------------
 This file has no shopping logic of its own. Every word is fed to the real Agent from agent.py
@@ -94,6 +102,8 @@ EXAMPLES = [
      "text": "bhai Loomsy ke navy blue sneakers dikhao size 7 under 4500 jaldi"},
     {"name": "Late constraint",
      "text": "I need olive Urbanyx slides under seven hundred, oh and size 6 for the beach trip"},
+    {"name": "Vague",                     # ends with 3 products left: shows the clarifying question
+     "text": "show me black Loomsy sneakers for office wear"},
 ]
 
 # Duel examples. "gold" = what the shopper finally wants, written by hand (like dev.jsonl).
@@ -310,7 +320,7 @@ class Recorder:
         self.steps.append(step)
         return step
 
-    def finish(self):
+    def finish(self, ask=True):
         final = self.agent.finish() or self.current        # the same rule as evaluate.py
         n = len(self.steps)
         commits = [(s["i"] + 1, s["commit"]) for s in self.steps if s["new_commit"]]
@@ -322,7 +332,135 @@ class Recorder:
             "words_before_end": (n - first) if first else 0,
             "values": {s: show_value(s, v) for s, v in self.agent.state.values.items()},
         }
+        if ask:                                            # demo only: see clarify() below
+            self.final["clarify"] = clarify([s["word"] for s in self.steps], self)
         return self.final
+
+
+# ------------------------------------------------------------------------------------------
+# Clarifying question (DEMO ONLY: not in agent.py, not used by evaluate.py or any score)
+# ------------------------------------------------------------------------------------------
+# When the request has ended and more than one product still fits, the agent's finish()
+# has to guess. Here the demo asks the shopper ONE question instead: the attribute whose
+# answer is expected to leave the fewest products. An answer is just more words; the page
+# sends request + answer through a fresh agent, exactly like any other request.
+CLARIFY_SLOTS = ("category", "colour", "size", "brand", "max_price")
+CLARIFY_MAX_OPTIONS = 8
+SIZE_ORDER = {s: k for k, s in enumerate(("XS", "S", "M", "L", "XL", "XXL", "XXXL"))}
+
+
+def remaining(rec):
+    """Products that still fit after finish(): the agent's own list when it has searched.
+
+    Before any search (no category or brand yet) the agent has no list, so the display-only
+    catalogue count is used, the same one the "products that still fit" panel shows.
+    """
+    cands = rec.agent._candidates()                       # read-only peek
+    if cands is not None:
+        return cands, "agent"
+    return [p for p in CATALOGUE if rec.agent.state.matches(p)], "catalogue"
+
+
+def _size_key(v):
+    v = str(v)
+    if v in SIZE_ORDER:
+        return (1, SIZE_ORDER[v], v)
+    try:
+        return (0, float(v), v)
+    except ValueError:
+        return (2, 0, v)
+
+
+def _price_bands(cands):
+    """Nested budget answers ("under ₹1,000", "under ₹2,000"...), one between each price level."""
+    levels = sorted({p["price"] for p in cands})
+    if len(levels) < 2:
+        return []
+    gaps = list(range(len(levels) - 1))
+    if len(gaps) > CLARIFY_MAX_OPTIONS - 1:              # keep it short: evenly spaced cut points
+        step = len(gaps) / (CLARIFY_MAX_OPTIONS - 1)
+        gaps = sorted({int(k * step) for k in range(CLARIFY_MAX_OPTIONS - 1)})
+    bands = []
+    for g in gaps:
+        lo, hi = levels[g], levels[g + 1]
+        t = next((r for r in (((lo + u - 1) // u) * u for u in (1000, 500, 100, 50, 10))
+                  if lo <= r < hi), lo)                  # a round number above lo, below hi
+        bands.append(t)
+    return sorted(set(bands))
+
+
+def _options(slot, cands):
+    """(label, answer words, products left after that answer) for one attribute."""
+    if slot == "max_price":
+        out = []
+        for t in _price_bands(cands):
+            left = [p for p in cands if p["price"] <= t]
+            out.append((f"under ₹{t:,}", f"under {t}", left))
+        return out
+    groups = {}
+    for p in cands:
+        groups.setdefault(str(p[slot]), []).append(p)
+    vals = sorted(groups, key=_size_key) if slot == "size" else sorted(groups)
+    words = {"size": "size {}", "category": "{}", "colour": "{}", "brand": "{}"}[slot]
+    return [(v, words.format(v), groups[v]) for v in vals]
+
+
+def _expected_left(slot, opts, n):
+    """Products expected to be left after the answer, if the wanted product is any one of them.
+
+    A colour/size/brand/category answer keeps one group: expected = sum(group²) / n.
+    Budget answers are nested ("under ₹2,000" also keeps the cheaper ones): the shopper picks
+    the lowest band that still holds their product, and everything at or under it stays.
+    """
+    if slot != "max_price":
+        return sum(len(left) ** 2 for _, _, left in opts) / n
+    total, done = 0, set()
+    for _, _, left in opts:                              # sorted from the lowest band up
+        ids = {p["product_id"] for p in left}
+        total += len(ids - done) * len(ids)
+        done |= ids
+    return (total + (n - len(done)) * n) / n             # above the top band: nothing narrows
+
+
+QUESTION = {"category": "Which one", "colour": "Which colour", "size": "Which size",
+            "brand": "Which brand", "max_price": "What's your budget"}
+
+
+def clarify(words, rec):
+    """One clarifying question for a finished request, or None if at most 1 product fits."""
+    cands, source = remaining(rec)
+    n = len(cands)
+    if n <= 1:
+        return None
+    best = None
+    for slot in CLARIFY_SLOTS:
+        opts = _options(slot, cands)
+        if len(opts) < 2:
+            continue                                     # every product agrees: nothing to ask
+        exp = _expected_left(slot, opts, n)
+        key = (len(opts) > CLARIFY_MAX_OPTIONS, exp, len(opts))
+        if best is None or key < best[0]:
+            best = (key, slot, opts, exp)
+    if best is None:
+        return None
+    _, slot, opts, exp = best
+    # Keep only answers that really work: request + answer, through a fresh agent, must leave
+    # exactly the products this answer promises (so no button ever lies).
+    checked = []
+    for label, answer, left in opts[:CLARIFY_MAX_OPTIONS]:
+        probe = Recorder()
+        for w in list(words) + answer.split():
+            probe.observe(w)
+        probe.finish(ask=False)
+        got, _ = remaining(probe)
+        if {p["product_id"] for p in got} == {p["product_id"] for p in left}:
+            checked.append({"label": label, "answer": answer, "left": len(left),
+                            "product": product_card(left[0]["product_id"]) if len(left) == 1 else None})
+    if len(checked) < 2:
+        return None
+    return {"slot": slot, "question": QUESTION[slot], "options": checked, "left": n,
+            "source": source, "guess": rec.final["final"],
+            "expected_left": round(exp, 1), "more_options": max(0, len(opts) - CLARIFY_MAX_OPTIONS)}
 
 
 def run_request(text):
@@ -648,7 +786,7 @@ def explore_replay(key, rid):
         rec = Recorder()
         for w in words:
             rec.observe(w)
-        final = rec.finish()
+        final = rec.finish(ask=False)            # no clarifying question in the Explorer
     replay_commits = [list(c) for c in final["commits"]]
     saved_commits = [list(c) for c in row["commits"]]
     for s in rec.steps:
@@ -1081,6 +1219,17 @@ table.fs td{padding:2px 6px 2px 0;color:var(--ink2);white-space:nowrap}
 table.fs td.k2{color:var(--muted)} table.fs td.bad{color:var(--red);font-weight:700}
 .case-f{font-size:14px;color:var(--muted);margin-top:8px}
 .case-f .ok{color:var(--go)} .case-f .bad{color:var(--red)} .case-f b{color:var(--ink2)}
+.clarify{display:none;margin-top:14px;border:1.5px solid var(--amb);border-radius:22px;background:var(--amb-bg);padding:16px 26px}
+.clarify.show{display:block}
+.cq-k{font-size:13px;letter-spacing:.18em;text-transform:uppercase;font-weight:700;color:var(--amb)}
+.cq-q{font-size:30px;font-weight:700;letter-spacing:-.015em;margin:4px 0 12px}
+.cq-o{display:flex;gap:10px;flex-wrap:wrap}
+.cq-b{background:var(--s1);border:1.5px solid var(--line2);border-radius:14px;padding:10px 20px;font-size:22px;font-weight:650;cursor:pointer;transition:all var(--t);display:flex;flex-direction:column;align-items:center}
+.cq-b:hover{border-color:var(--amb);color:var(--amb)}
+.cq-b:disabled{opacity:.45;cursor:default}
+.cq-b small{font:500 13px var(--mono);color:var(--muted);margin-top:2px}
+.cq-n{margin-top:10px;font-size:15px;color:var(--ink2)} .cq-n b{color:var(--ink)}
+.w.ans{border-color:rgba(255,181,71,.55);border-style:dashed}
 .reveal.bad{border-color:var(--red);background:var(--red-bg)}
 .reveal.bad .kick,.reveal.bad .found em{color:var(--red)}
 .fin .gold{color:var(--muted)}
@@ -1175,6 +1324,7 @@ table.fs td.k2{color:var(--muted)} table.fs td.bad{color:var(--red);font-weight:
     </div>
   </div>
 
+  <div class="clarify" id="clarify"></div>
   <div class="reveal" id="reveal">
     <div class="rv-top">
       <div><div class="kick" id="rv-kick">Committed</div><div class="found" id="rv-found"></div><div class="fin" id="rv-fin"></div></div>
@@ -1274,7 +1424,7 @@ async function post(url, body) {
 const later = (el, cls) => requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add(cls)));
 
 /* ============================== single-agent view ============================== */
-const V = { words: [], steps: [], shown: 0, final: null, trail: [] };
+const V = { words: [], steps: [], shown: 0, final: null, trail: [], asked: 0 };
 
 function buildChips() {
   $("chips").innerHTML = SLOTS.map(([k, n]) =>
@@ -1298,6 +1448,7 @@ function resetView(words) {
   $("fbar").className = "fbar"; $("fbar").firstElementChild.style.width = "100%";
   $("trail").innerHTML = `<b class="last">${B.catalogue}</b>`; $("fnote").textContent = "Nothing said yet: the whole catalogue fits.";
   const rv = $("reveal"); rv.className = "reveal";
+  V.asked = 0; $("clarify").className = "clarify"; $("clarify").innerHTML = "";
   window.scrollTo({top: 0});
   drawChart();
 }
@@ -1423,23 +1574,59 @@ function showFinal(f) {
   V.final = f;
   document.querySelectorAll("#stream .w.now").forEach(e => e.classList.remove("now"));
   const rv = $("reveal");
+  const q = MODE === "explore" ? null : f.clarify;      // demo only; never in the Explorer
   if (!f.first_commit_word) {          // never committed early: show the final answer, plainly
     rv.className = "reveal show neutral";
-    $("rv-kick").textContent = "Answer at the full stop";
-    $("rv-found").innerHTML = f.final ? `Waited for the full stop — <em>never safe to commit earlier</em>` : `No product found`;
+    $("rv-kick").textContent = q ? `Request ended · ${q.left} products still fit · agent's best guess shown`
+      : (V.asked ? `Answer after ${plural(V.asked, "clarifying question")}` : "Answer at the full stop");
+    $("rv-found").innerHTML = !f.final ? `No product found`
+      : q ? `<em>${q.left} products</em> still fit — one question settles it`
+      : V.asked ? `Exactly <em>1 product</em> fits after your answer`
+      : `Waited for the full stop — <em>never safe to commit earlier</em>`;
     fillProduct(f.final_product || {}, f.final);
     $("rv-receipt").innerHTML = `<div><div class="k">Filters at the end</div><div class="v">${SLOTS.filter(([k]) => f.values[k] != null).map(([k]) => `<b>${esc(cap(f.values[k]))}</b>`).join(" · ")}</div></div>` +
-      `<div><div class="k">Why no early commit</div><div class="v">${esc(V.steps.length ? (V.steps[V.steps.length - 1].waiting || "") : "")}</div></div>` +
+      (V.asked && !q
+        ? `<div><div class="k">How it was decided</div><div class="v">Your answer left exactly 1 product, so the agent's finish() returned it. Its early-commit gate stays as it is: the answer was the last word, with no neutral word after it.</div></div>`
+        : `<div><div class="k">Why no early commit</div><div class="v">${esc(V.steps.length ? (V.steps[V.steps.length - 1].waiting || "") : "")}</div></div>`) +
       `<div><div class="k">Words</div><div class="bigv">${f.words}</div></div><div><div class="k">Searches used</div><div class="bigv">${f.searches}<small>counted</small></div></div>`;
     $("rv-fin").innerHTML = goldLine(f.final);
     later(rv, "in");
+    showClarify(q);
     revealIntoView();
     return;
   }
+  showClarify(q);
   const same = f.commits.length && f.commits[f.commits.length - 1][1] === f.final;
   $("rv-fin").innerHTML = `Full stop · final answer <b>${esc(f.final)}</b> ` +
     (same ? `<span class="ok">✓ the product it committed to</span>` : `<span class="bad">differs from its last commit</span>`) +
     ` · ${plural(f.searches, "search")} in total` + (goldLine(f.final) ? " · " + goldLine(f.final) : "");
+}
+/* Clarifying question (demo only, not in agent.py or any score). The server picks the
+   attribute whose answer is expected to leave the fewest products, and offers only answers
+   it has checked through a fresh agent. An answer is added as words to the request. */
+function showClarify(q) {
+  const el = $("clarify");
+  if (!q) { el.className = "clarify"; el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="cq-k">Clarifying question · demo only, not part of agent.py or the score</div>
+    <div class="cq-q">${esc(q.question)}: ${q.options.map(o => esc(o.label)).join(" · ")}?</div>
+    <div class="cq-o">${q.options.map((o, k) => `<button class="cq-b" data-k="${k}">${esc(o.label)}<small>${o.left === 1 ? "1 product" : o.left + " products"}</small></button>`).join("")}</div>
+    <div class="cq-n">Asked because ${q.left} products still fit${q.source === "catalogue" ? " (counted over the catalogue: the agent has not searched yet)" : " in the agent's own search"}.
+      ${esc(SLOT_NAME[q.slot] || q.slot)} splits them best: about <b>${q.expected_left}</b> left after the answer, on average.
+      ${q.more_options ? `${q.more_options} more answer(s) not shown.` : ""} Clicking an answer adds it as words: <span class="num">"${esc(q.options[0].answer)}"</span>.</div>`;
+  el.querySelectorAll(".cq-b").forEach(b => b.onclick = () => answerClarify(q.options[+b.dataset.k].answer));
+  el.className = "clarify show";
+}
+async function answerClarify(answer) {
+  $("clarify").querySelectorAll("button").forEach(b => b.disabled = true);
+  const start = V.words.length, words = V.words.concat(answer.split(" "));
+  const d = await post("/api/run", {text: words.join(" ")});   // request + answer, fresh agent
+  if (d.error) { $("clarify").insertAdjacentHTML("beforeend", `<div class="err">${esc(d.error)}</div>`); return; }
+  const asked = V.asked + 1;
+  for (const w of d.words.slice(start)) { addWord(w); $("w" + (V.words.length - 1)).classList.add("ans"); }
+  for (const s of d.steps.slice(start)) applyStep(s);
+  V.asked = asked;
+  if (MODE === "live") { $("live-in").value = words.join(" "); LIVE.sid = null; LIVE.sent = []; }
+  showFinal(d.final);
 }
 function goldLine(final) {               // Explorer only: the final answer against the gold target
   if (MODE !== "explore" || !XP.cur) return "";
