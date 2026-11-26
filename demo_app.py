@@ -5,7 +5,7 @@
 
 Standard library only, works offline (no CDN, no build step). Ctrl+C in the terminal stops it.
 
-Four tabs
+Five tabs
 ---------
   LIVE TYPE      type your own request; every time you press space, the finished word is
                  sent to a real Agent on this server (one agent per typing session).
@@ -19,6 +19,11 @@ Four tabs
                  Each one is scored with evaluate.score_one(), the organisers' own formula.
   RESULTS        results/strategies.csv, results/speed_safety.svg and the headline numbers,
                  all read from the files in results/ when the page loads.
+  TRADE-OFF      a 5-position slider from Eager to Extra safe. Each position is a set of
+                 agent.CONFIG changes (TRADEOFF below), made in memory for ONE evaluate.run()
+                 on all of dev.jsonl and then put back. Every slider move is a fresh run; the
+                 page shows score, accuracy, wrong commits, earliness and a dot on a
+                 speed-vs-safety chart. The server checks CONFIG is back to agent.py's values.
 
 Nothing on screen is invented
 -----------------------------
@@ -45,6 +50,7 @@ import copy
 import csv
 import json
 import threading
+import time
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -429,6 +435,53 @@ def duel(text):
 
 
 # ------------------------------------------------------------------------------------------
+# Trade-off tab: one slider, five real CONFIG settings, scored live on dev.jsonl
+# ------------------------------------------------------------------------------------------
+DEFAULT_CONFIG = copy.deepcopy(A.CONFIG)             # agent.py's settings, to check restores
+with open(HERE / "dev.jsonl", encoding="utf-8") as _fh:
+    DEV = [json.loads(line) for line in _fh if line.strip()]
+
+# (key, name, what it means, CONFIG changes). Only agent.CONFIG is changed, in memory, for
+# one evaluate.run(); settings() puts it back. "Eager" gives the same dev numbers as the
+# "Eager (no safety gate)" row of results/ablation.md (43.0, 21 wrong commits).
+TRADEOFF = [
+    ("eager", "Eager", "Commits as soon as one product is left: no quiet word needed, and any value "
+     "(colour, size, brand too) may be committed on the very word it appears.",
+     {"quiet_words": 0, "instant_slots": compare.ALL_SLOTS}),
+    ("fast", "Fast", "Normal quiet-word rule, but every value (not only category and price) may be "
+     "committed on its own word.",
+     {"instant_slots": compare.ALL_SLOTS}),
+    ("default", "Prescient default", "agent.py exactly as submitted.", {}),
+    ("safe", "Safe", "Waits for 2 quiet words instead of 1 before committing.",
+     {"quiet_words": 2}),
+    ("xsafe", "Extra safe", "Waits for 2 quiet words, and never commits on the category/price word itself.",
+     {"quiet_words": 2, "instant_slots": ()}),
+]
+
+
+def jsonable(cfg):
+    return {k: list(v) if isinstance(v, tuple) else v for k, v in cfg.items()}
+
+
+def tradeoff(level):
+    key, name, meaning, changes = TRADEOFF[max(0, min(int(level), len(TRADEOFF) - 1))]
+    with LOCK:
+        with settings(changes, None):
+            used = jsonable(A.CONFIG)                    # the settings this run really used
+            t0 = time.perf_counter()
+            results, _ = evaluate.run(Agent, DEV)
+            ms = 1000 * (time.perf_counter() - t0)
+        restored = A.CONFIG == DEFAULT_CONFIG            # settings() has put agent.py's back
+    s = evaluate.summarise(results)
+    return {"key": key, "name": name, "meaning": meaning, "changes": jsonable(changes),
+            "config": used, "requests": s["requests"], "score": round(s["score"], 1),
+            "accuracy": s["accuracy"], "wrong_commits": s["wrong_commits"],
+            "requests_with_wrong_commit": s["requests_with_wrong_commit"],
+            "earliness_pct": round(100 * s["early_share"], 1), "searches": round(s["searches"], 2),
+            "ms": round(ms), "restored": restored}
+
+
+# ------------------------------------------------------------------------------------------
 # Results tab: read straight from results/
 # ------------------------------------------------------------------------------------------
 def read_csv(path):
@@ -464,7 +517,9 @@ def boot():
             "threshold": A.CONFIG["commit_threshold"], "catalogue": len(CATALOGUE),
             "fetch_k": A.CONFIG["fetch_k"], "quiet_words": A.CONFIG["quiet_words"],
             "eager_config": {k: list(v) if isinstance(v, tuple) else v
-                             for k, v in EAGER_CONFIG.items()}}
+                             for k, v in EAGER_CONFIG.items()},
+            "tradeoff": [{"key": k, "name": n} for k, n, _, _ in TRADEOFF],
+            "dev_requests": len(DEV)}
 
 
 # ------------------------------------------------------------------------------------------
@@ -507,6 +562,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(run_request(text))
             if self.path == "/api/duel":
                 return self._json(duel(text))
+            if self.path == "/api/tradeoff":
+                return self._json(tradeoff(body.get("level", 2)))
             if self.path == "/api/live":
                 return self._json(live(body.get("action"), body.get("session"), body.get("word")))
             self._send(404, "not found", "text/plain")
@@ -569,6 +626,27 @@ input[type=range]{accent-color:var(--ink);width:150px}
   padding:16px 20px;font-size:26px;outline:none;transition:border-color var(--t)}
 .live-in:focus{border-color:var(--ink2)}
 .hint{color:var(--muted);font-size:15px}
+/* voice mode */
+.mic{display:flex;align-items:center;gap:10px;background:var(--s2);border:1px solid var(--line2);border-radius:14px;
+  padding:14px 22px;font-size:18px;font-weight:700;letter-spacing:.06em;cursor:pointer;transition:all var(--t)}
+.mic:hover{border-color:var(--muted)}
+.mic svg{width:22px;height:22px}
+.mic.on{background:var(--red);border-color:var(--red);color:#fff;box-shadow:0 0 0 6px var(--red-bg)}
+.mic[disabled]{opacity:.4;cursor:not-allowed}
+.voice{display:none;align-items:center;gap:16px;width:100%;margin-top:4px;padding:12px 18px;
+  background:var(--s1);border:1px solid var(--line);border-radius:14px}
+.voice.show{display:flex}
+.listen{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--dim);white-space:nowrap}
+.listen i{width:12px;height:12px;border-radius:50%;background:var(--dim)}
+.voice.live .listen{color:var(--red)}
+.voice.live .listen i{background:var(--red);animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,93,93,.6)}50%{box-shadow:0 0 0 9px rgba(255,93,93,0)}}
+.tx{flex:1;font-size:22px;min-height:30px;color:var(--ink)}
+.tx .interim{color:var(--muted);font-style:italic}
+.tx .ph{color:var(--dim)}
+.vnote{font-size:13px;color:var(--muted);max-width:330px;line-height:1.35}
+.vwarn{color:var(--amb);font-size:16px;font-weight:600}
 .hint b{color:var(--ink2);font-weight:600}
 
 /* request stream */
@@ -773,6 +851,29 @@ tr.me .sbar{background:var(--go);opacity:1}
 .paper img{width:100%;display:block}
 .src{font-size:13px;color:var(--muted);margin-top:10px;font-family:var(--mono)}
 
+/* trade-off */
+.to-top{display:grid;grid-template-columns:1fr;gap:6px;margin-top:22px}
+.to-q{font-size:30px;font-weight:700;letter-spacing:-.02em}
+.to-q em{font-style:normal;color:var(--go)}
+.to-sl{position:relative;margin:22px 8px 0}
+.to-sl input{width:100%;accent-color:var(--go);height:28px;cursor:pointer}
+.to-ticks{display:grid;grid-template-columns:repeat(5,1fr);margin:6px -8px 0;text-align:center}
+.to-ticks button{background:none;border:0;color:var(--muted);font:600 16px var(--sans);cursor:pointer;padding:6px 2px}
+.to-ticks button.on{color:var(--ink)}
+.to-ticks button .mk{display:block;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--go);margin-top:2px}
+.to-ends{display:flex;justify-content:space-between;font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin-top:2px}
+.to-mean{margin-top:14px;font-size:18px;color:var(--ink2);min-height:26px}
+.to-mean code{font:500 16px var(--mono);color:var(--ink);background:var(--s2);border:1px solid var(--line2);border-radius:7px;padding:1px 7px}
+.to-grid{display:grid;grid-template-columns:1fr 1.25fr;gap:20px;margin-top:18px;align-items:start}
+.to-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.to-card{background:var(--s1);border:1.5px solid var(--line);border-radius:16px;padding:18px 20px 20px}
+.to-card .k{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.to-card .v{font:700 54px var(--mono);letter-spacing:-.04em;line-height:1.1;margin-top:6px;transition:color var(--t)}
+.to-card .d{font-size:14px;color:var(--muted)}
+.to-card .v.go{color:var(--go)} .to-card .v.bad{color:var(--red)}
+.to-cards.busy .v{opacity:.45}
+svg.to-chart{width:100%;height:auto;display:block}
+#to-dot{transition:transform 450ms cubic-bezier(.2,.8,.2,1)}
 .view{display:none} .view.on{display:block}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
 .err{color:var(--red);font-size:18px}
@@ -790,6 +891,7 @@ tr.me .sbar{background:var(--go);opacity:1}
     <button data-v="examples" class="on">EXAMPLES<kbd>2</kbd></button>
     <button data-v="duel">STRATEGY DUEL<kbd>3</kbd></button>
     <button data-v="results">RESULTS<kbd>4</kbd></button>
+    <button data-v="tradeoff">TRADE-OFF<kbd>5</kbd></button>
   </nav>
 </header>
 
@@ -805,7 +907,13 @@ tr.me .sbar{background:var(--go);opacity:1}
   </div>
   <div class="bar" id="bar-live" style="display:none">
     <input class="live-in" id="live-in" placeholder="Type a request… e.g. white Loomsy sneakers size 9 for office" autocomplete="off" spellcheck="false">
+    <button class="mic" id="mic" title="Speak your request (voice mode)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></svg><span id="mic-t">VOICE</span></button>
     <div class="hint"><b>Space</b> sends each finished word<br><b>Enter</b> = full stop &nbsp;·&nbsp; <b>Esc</b> clears</div>
+    <div class="voice" id="voice">
+      <div class="listen" id="listen"><i></i><span id="listen-t">Mic off</span></div>
+      <div class="tx" id="tx"><span class="ph">Live transcript appears here…</span></div>
+      <div class="vnote">Voice uses the browser's own speech-to-text (Chrome, needs internet). The agent itself stays fully offline: it only ever receives the finished words.</div>
+    </div>
   </div>
 
   <div class="stream" id="stream"></div>
@@ -895,6 +1003,32 @@ tr.me .sbar{background:var(--go);opacity:1}
       <div class="paper"><img id="svg" alt="Speed vs safety chart"></div>
       <div class="src">source: results/speed_safety.svg · made by python3 compare.py</div></div>
   </div>
+</section>
+
+<!-- ===================== TRADE-OFF ===================== -->
+<section class="view" id="v-tradeoff">
+  <div class="to-top">
+    <div class="to-q">How careful should the agent be? <em>Move the slider.</em></div>
+    <div class="fnote">Each position changes <code>agent.CONFIG</code> in memory only, runs the organisers' <code>evaluate.run()</code> on all of dev.jsonl, then puts agent.py's settings back.</div>
+  </div>
+  <div class="to-sl">
+    <input type="range" id="to-range" min="0" max="4" step="1" value="2" aria-label="Eager to extra safe">
+    <div class="to-ends"><span>&larr; faster</span><span>safer &rarr;</span></div>
+    <div class="to-ticks" id="to-ticks"></div>
+  </div>
+  <div class="to-mean" id="to-mean"></div>
+  <div class="to-grid">
+    <div class="to-cards" id="to-cards">
+      <div class="to-card"><div class="k">Score</div><div class="v" id="to-score">–</div><div class="d">evaluate.py's SCORE</div></div>
+      <div class="to-card"><div class="k">Accuracy</div><div class="v" id="to-acc">–</div><div class="d">final answer right</div></div>
+      <div class="to-card"><div class="k">Wrong commits</div><div class="v" id="to-wrong">–</div><div class="d" id="to-wrong-d">each one costs 1.0 point</div></div>
+      <div class="to-card"><div class="k">Earliness</div><div class="v" id="to-early">–</div><div class="d">of the request saved</div></div>
+    </div>
+    <div class="panel"><h4>Speed vs safety · dev · best = bottom right</h4>
+      <svg class="to-chart" id="to-chart" viewBox="0 0 640 380"></svg>
+    </div>
+  </div>
+  <div class="src" id="to-src"></div>
 </section>
 
 </div>
@@ -1169,8 +1303,82 @@ function liveSync(finish) {
 $("live-in").addEventListener("input", () => liveSync(false));
 $("live-in").addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); liveSync(true); }
-  if (e.key === "Escape") { $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]); }
+  if (e.key === "Escape") { voiceStop(false); $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]); }
 });
+
+/* ============================== VOICE mode (inside LIVE TYPE) ==============================
+   The browser's speech recogniser turns speech into text (Chrome sends the audio to its own
+   speech service, so it needs internet). Each FINALISED word is written into the same input box
+   and sent through liveSync(), exactly as if it had been typed and followed by a space.
+   The agent never sees audio or interim guesses: only finished words, as in typed mode.     */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const VOICE = { rec: null, on: false, finals: "", interim: "", cancel: false };
+function voiceUI() {
+  $("voice").classList.add("show");
+  $("voice").classList.toggle("live", VOICE.on);
+  $("mic").classList.toggle("on", VOICE.on);
+  $("mic-t").textContent = VOICE.on ? "STOP" : "VOICE";
+  $("listen-t").textContent = VOICE.on ? "Listening…" : "Mic off";
+  const f = VOICE.finals.trim(), it = VOICE.interim.trim();
+  $("tx").innerHTML = (f || it) ? `${esc(f)} <span class="interim">${esc(it)}</span>`
+    : `<span class="ph">${VOICE.on ? "Speak now — e.g. “black Stridex running shoes size 9 under 3000”" : "Live transcript appears here…"}</span>`;
+}
+function voiceWarn(msg) {
+  $("voice").classList.add("show"); $("voice").classList.remove("live");
+  $("listen-t").textContent = "Voice off";
+  $("tx").innerHTML = `<span class="vwarn">${esc(msg)}</span>`;
+}
+function voiceStart() {
+  if (!SR) return voiceWarn("Voice needs the browser's speech recognition, which this browser does not have. Use Chrome.");
+  // fresh request: clear the box and start a new agent session
+  $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]);
+  $("stream").innerHTML = `<span class="empty-note">Listening — each word goes to the agent as soon as the recogniser finalises it.</span>`;
+  const rec = new SR();
+  rec.lang = "en-IN";               // Indian English: copes with Hinglish ("kaale joote", "2000 tak")
+  rec.continuous = true;            // keep listening across pauses
+  rec.interimResults = true;        // show guesses live (grey); only final words reach the agent
+  rec.maxAlternatives = 1;
+  rec.onresult = ev => {
+    let interim = "";
+    for (let k = ev.resultIndex; k < ev.results.length; k++) {
+      const res = ev.results[k], t = res[0].transcript;
+      if (res.isFinal) {
+        VOICE.finals += " " + t;
+        const words = t.trim().split(/\s+/).filter(Boolean);
+        if (words.length) {           // same path as typing: append the words + a space, then sync
+          const box = $("live-in");
+          box.value = (box.value && !/\s$/.test(box.value) ? box.value + " " : box.value) + words.join(" ") + " ";
+          liveSync(false);
+        }
+      } else interim += t;
+    }
+    VOICE.interim = interim; voiceUI();
+  };
+  rec.onerror = ev => {
+    const why = {"not-allowed": "Microphone permission was refused. Allow the mic for this page and try again.",
+                 "service-not-allowed": "Microphone permission was refused. Allow the mic for this page and try again.",
+                 "network": "Speech-to-text needs internet (the browser's recogniser is online). The agent itself still works offline: type instead.",
+                 "no-speech": "No speech heard. Click VOICE and try again.",
+                 "audio-capture": "No microphone found."}[ev.error];
+    if (why) { VOICE.cancel = ev.error !== "no-speech" || !VOICE.finals.trim(); VOICE.on = false; voiceWarn(why); }
+  };
+  rec.onend = () => {                // stopped by the button or by Chrome after a long silence:
+    const cancel = VOICE.cancel;     // treat it as the shopper's full stop
+    VOICE.on = false; VOICE.rec = null; VOICE.interim = ""; VOICE.cancel = false;
+    if (!cancel && $("live-in").value.trim()) liveSync(true);
+    if (!$("tx").querySelector(".vwarn")) voiceUI();
+  };
+  VOICE.rec = rec; VOICE.on = true; VOICE.finals = ""; VOICE.interim = ""; VOICE.cancel = false;
+  try { rec.start(); } catch (e) { VOICE.on = false; return voiceWarn(String(e)); }
+  voiceUI();
+}
+function voiceStop(fullStop) {
+  if (!VOICE.rec) return;
+  VOICE.cancel = !fullStop;
+  VOICE.rec.stop();                  // onend fires after any last final words arrive
+}
+$("mic").onclick = () => VOICE.on ? voiceStop(true) : voiceStart();
+if (!SR) $("mic").title = "Voice needs Chrome (browser speech recognition not available here)";
 
 /* ============================== STRATEGY DUEL ============================== */
 const D = { data: null, timer: null, idx: 0, shown: 0, custom: null };
@@ -1298,6 +1506,90 @@ async function loadResults() {
   if (r.has_svg) $("svg").src = "/results/speed_safety.svg";
 }
 
+/* ============================== TRADE-OFF ============================== */
+const TO = {runs: {}, seq: 0, timer: null, started: false};
+const TO_X = {L: 64, R: 616, T: 20, B: 330, xmax: 20, ymax: 25};
+const toX = e => TO_X.L + (TO_X.R - TO_X.L) * Math.min(e, TO_X.xmax) / TO_X.xmax;
+const toY = w => TO_X.B - (TO_X.B - TO_X.T) * Math.min(w, TO_X.ymax) / TO_X.ymax;
+function toTicks() {
+  const lv = +$("to-range").value;
+  $("to-ticks").innerHTML = B.tradeoff.map((t, i) => `<button data-i="${i}" class="${i === lv ? "on" : ""}">${esc(t.name)}${t.key === "default" ? `<span class="mk">&#9733; submitted</span>` : ""}</button>`).join("");
+  $("to-ticks").querySelectorAll("button").forEach(b => b.onclick = () => { $("to-range").value = b.dataset.i; toMove(0); });
+}
+function toChart(cur) {
+  let g = "";
+  for (let e = 0; e <= TO_X.xmax; e += 5) g += `<line x1="${toX(e)}" y1="${TO_X.T}" x2="${toX(e)}" y2="${TO_X.B}" stroke="#1b222b"/><text x="${toX(e)}" y="${TO_X.B + 20}" fill="#7f8b98" font-size="13" text-anchor="middle">${e}%</text>`;
+  for (let w = 0; w <= TO_X.ymax; w += 5) g += `<line x1="${TO_X.L}" y1="${toY(w)}" x2="${TO_X.R}" y2="${toY(w)}" stroke="#1b222b"/><text x="${TO_X.L - 10}" y="${toY(w) + 4}" fill="#7f8b98" font-size="13" text-anchor="end">${w}</text>`;
+  g += `<text x="${(TO_X.L + TO_X.R) / 2}" y="${TO_X.B + 44}" fill="#c4ccd5" font-size="14" text-anchor="middle">earliness (% of the request saved) &rarr;</text>`;
+  g += `<text transform="translate(18,${(TO_X.T + TO_X.B) / 2}) rotate(-90)" fill="#c4ccd5" font-size="14" text-anchor="middle">wrong commits</text>`;
+  const done = B.tradeoff.map((t, i) => TO.runs[i] ? [i, TO.runs[i]] : null).filter(Boolean);
+  if (done.length > 1) g += `<polyline fill="none" stroke="#46505c" stroke-width="1.5" stroke-dasharray="4 4" points="${done.map(([, r]) => `${toX(r.earliness_pct)},${toY(r.wrong_commits)}`).join(" ")}"/>`;
+  let zero = 0;                                  // points on the 0 line: stagger their labels
+  for (const [i, r] of done) {
+    const x = toX(r.earliness_pct), y = toY(r.wrong_commits), left = x > TO_X.R - 150;
+    g += `<circle cx="${x}" cy="${y}" r="5" fill="${r.wrong_commits ? "#ff5d5d" : "#7f8b98"}" opacity=".7"/>`;
+    const lbl = `${esc(r.name)} (${r.earliness_pct}%, ${r.wrong_commits})`;
+    if (r.wrong_commits) g += `<text x="${x + (left ? -10 : 10)}" y="${y - 10}" fill="#7f8b98" font-size="13" text-anchor="${left ? "end" : "start"}">${lbl}</text>`;
+    else { const ly = y - 26 - 22 * (zero++ % 3);
+      g += `<line x1="${x}" y1="${y - 7}" x2="${x}" y2="${ly + 4}" stroke="#2a323c"/><text x="${x}" y="${ly}" fill="#7f8b98" font-size="13" text-anchor="middle">${lbl}</text>`; }
+  }
+  const c = cur || TO.runs[+$("to-range").value];
+  const tx = c ? toX(c.earliness_pct) : toX(0), ty = c ? toY(c.wrong_commits) : toY(0);
+  const col = c && c.wrong_commits ? "#ff5d5d" : "#3ee08f";
+  g += `<g id="to-dot" style="transform:translate(${TO.lastX ?? tx}px,${TO.lastY ?? ty}px);opacity:${c ? 1 : 0}"><circle r="17" fill="${col}" opacity=".18"/><circle r="9" fill="${col}" stroke="#06080b" stroke-width="2"/></g>`;
+  $("to-chart").innerHTML = g;
+  if (c) requestAnimationFrame(() => requestAnimationFrame(() => { const d = $("to-dot"); if (d) d.style.transform = `translate(${tx}px,${ty}px)`; }));
+  TO.lastX = tx; TO.lastY = ty;
+}
+function toShow(r) {
+  $("to-score").textContent = r.score.toFixed(1);
+  $("to-acc").textContent = r.accuracy.toFixed(3);
+  $("to-acc").className = "v " + (r.accuracy === 1 ? "go" : "bad");
+  $("to-wrong").textContent = r.wrong_commits;
+  $("to-wrong").className = "v " + (r.wrong_commits ? "bad" : "go");
+  $("to-wrong-d").textContent = r.wrong_commits ? `in ${r.requests_with_wrong_commit} of ${r.requests} requests · 1.0 point each` : "each one would cost 1.0 point";
+  $("to-early").textContent = r.earliness_pct.toFixed(1) + "%";
+  const ch = Object.entries(r.changes);
+  $("to-mean").innerHTML = `<b>${esc(r.name)}</b> — ${esc(r.meaning)} ` +
+    (ch.length ? ch.map(([k, v]) => `<code>${esc(k)} = ${esc(Array.isArray(v) ? (v.length ? v.join(", ") : "none") : v)}</code>`).join(" ") : `<code>no changes</code>`);
+  $("to-src").innerHTML = `evaluate.run(Agent, dev.jsonl) · ${r.requests} requests · ${r.searches} searches/request · ${r.ms} ms · ` +
+    (r.restored ? `agent.CONFIG restored to agent.py's defaults &#10003;` : `<span class="err">CONFIG NOT restored</span>`);
+}
+async function toRun(i) {
+  const r = await post("/api/tradeoff", {level: i});
+  if (r.error) throw new Error(r.error);
+  TO.runs[i] = r; return r;
+}
+async function toMove(delay) {
+  const i = +$("to-range").value, my = ++TO.seq;
+  toTicks(); $("to-cards").classList.add("busy");
+  $("to-mean").innerHTML = `<b>${esc(B.tradeoff[i].name)}</b> — running evaluate.run on ${B.dev_requests} dev requests…`;
+  clearTimeout(TO.timer);
+  TO.timer = setTimeout(async () => {
+    try {
+      const r = await toRun(i);                  // always a fresh run, never a cached number
+      if (my !== TO.seq) { toChart(); return; }
+      $("to-cards").classList.remove("busy"); toShow(r); toChart(r);
+    } catch (e) { $("to-mean").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  }, delay);
+}
+async function loadTradeoff() {
+  toTicks(); toChart();
+  if (TO.started) return; TO.started = true;
+  // First visit: run every position once (real runs) so the whole curve is on the chart,
+  // then land on the submitted default.
+  $("to-cards").classList.add("busy");
+  try {
+    for (let i = 0; i < B.tradeoff.length; i++) {
+      $("to-mean").innerHTML = `Running evaluate.run on ${B.dev_requests} dev requests: <b>${esc(B.tradeoff[i].name)}</b> (${i + 1}/${B.tradeoff.length})…`;
+      await toRun(i); toChart();
+    }
+  } catch (e) { $("to-mean").innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+  const i = +$("to-range").value;
+  $("to-cards").classList.remove("busy"); toShow(TO.runs[i]); toChart(TO.runs[i]);
+}
+$("to-range").oninput = () => toMove(120);
+
 /* ============================== tabs + keys ============================== */
 let MODE = "examples";
 function setMode(m, noLoad) {
@@ -1306,18 +1598,20 @@ function setMode(m, noLoad) {
   $("v-single").classList.toggle("on", m === "live" || m === "examples");
   $("v-duel").classList.toggle("on", m === "duel");
   $("v-results").classList.toggle("on", m === "results");
+  $("v-tradeoff").classList.toggle("on", m === "tradeoff");
   $("bar-examples").style.display = m === "examples" ? "" : "none";
   $("bar-live").style.display = m === "live" ? "" : "none";
-  stopEx(); stopDuel();
+  stopEx(); stopDuel(); if (m !== "live") voiceStop(false);
   if (m === "examples" && !noLoad) { if (EX.data) resetView(EX.data.words); else loadExample(false); }
   if (m === "live") { $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]); setTimeout(() => $("live-in").focus(), 50); }
   if (m === "duel" && !D.data && !noLoad) loadDuel(false);
   if (m === "results") loadResults();
+  if (m === "tradeoff") loadTradeoff();
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => setMode(b.dataset.v));
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT") return;
-  if (["1","2","3","4"].includes(e.key)) setMode(["live","examples","duel","results"][+e.key - 1]);
+  if (["1","2","3","4","5"].includes(e.key)) setMode(["live","examples","duel","results","tradeoff"][+e.key - 1]);
   if (e.key === " " || e.key === "ArrowRight") {
     e.preventDefault();
     if (MODE === "examples") (e.key === " " ? $("play") : $("next")).click();
@@ -1330,10 +1624,10 @@ $("thr").style.left = pct(B.threshold); $("thr").querySelector("b").textContent 
 $("fcat").textContent = B.catalogue;
 speedLabel($("speed"), $("speedv")); speedLabel($("d-speed"), $("d-speedv"));
 exButtons(); duelButtons(); buildChips();
-// Optional deep links (handy for recording): #live  #examples/1  #examples/1/play  #duel/0/play  #results
+// Optional deep links (handy for recording): #live  #examples/1  #examples/1/play  #duel/0/play  #results  #tradeoff
 (async () => {
   const [m, k, act] = location.hash.replace("#", "").split("/");
-  const mode = ["live", "examples", "duel", "results"].includes(m) ? m : "examples";
+  const mode = ["live", "examples", "duel", "results", "tradeoff"].includes(m) ? m : "examples";
   if (mode === "examples" && k != null) { EX.idx = Math.min(+k || 0, B.examples.length - 1); exButtons(); }
   if (mode === "duel" && k != null) { D.idx = Math.min(+k || 0, B.duel_examples.length - 1); duelButtons(); }
   setMode(mode, act === "play");

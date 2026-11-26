@@ -14,6 +14,13 @@ python3 demo_app.py                    # live demo at http://127.0.0.1:8000
 python3 compare.py                     # compare commit strategies → results/ablation.md, results/speed_safety.svg
 ```
 
+**Voice mode (demo only).** In the demo's LIVE TYPE tab, click **VOICE** and speak the request
+(Chrome; language `en-IN`, so Hinglish like "kaale joote 2000 tak" works). Each word the browser's
+recogniser *finalises* is sent to the agent exactly like a typed word, so the pipeline, funnel and
+commit update while you are still speaking; click **STOP** (or stay silent) for the full stop.
+Voice uses the browser's own speech-to-text, which needs internet. The agent itself stays fully
+offline: it only receives finished words, and `evaluate.py` never uses voice.
+
 ## The problem, in one sentence
 A shopper speaks a request one word at a time, and the agent must show the right product
 **before they finish**, without ever showing a wrong one.
