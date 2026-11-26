@@ -1,6 +1,6 @@
 """Write a synthetic stress-test set to tests/stress.jsonl, in the same format as dev.jsonl.
 
-    python3 stress_test.py                    # writes tests/stress.jsonl (150 requests)
+    python3 tests/stress_test.py              # writes tests/stress.jsonl (150 requests)
     python3 evaluate.py --agent agent.py --data tests/stress.jsonl
 
 How each request is built
@@ -22,12 +22,16 @@ Standard library only. Fixed random seed, so the file is the same every run.
 import json
 import random
 import re
+import sys
 from pathlib import Path
+
+HERE = Path(__file__).resolve().parent   # tests/
+ROOT = HERE.parent                       # project top folder (search.py, dev.jsonl)
+sys.path.insert(0, str(ROOT))
 
 from search import load_catalogue
 
-HERE = Path(__file__).resolve().parent
-OUT = HERE / "tests" / "stress.jsonl"
+OUT = HERE / "stress.jsonl"
 N_REQUESTS = 150
 SEED = 2026
 
@@ -376,7 +380,7 @@ def build(target, chosen, rng, dev_vocab):
 
 def main():
     rng = random.Random(SEED)
-    with open(HERE / "dev.jsonl", encoding="utf-8") as fh:
+    with open(ROOT / "dev.jsonl", encoding="utf-8") as fh:
         dev = [json.loads(line) for line in fh if line.strip()]
     dev_texts = {r["text"].lower() for r in dev}
     dev_vocab = {w for r in dev for w in re.findall(r"[a-z0-9'-]+", r["text"].lower())}

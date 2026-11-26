@@ -116,7 +116,7 @@ looks slightly harmful on dev, yet it prevents 9 wrong commits on the holdout.
 |---|---|
 | Dev score, accuracy, earliness, searches, latency, baseline | `python3 evaluate.py --agent agent.py` |
 | Cross-validation 45.9 ± 1.0, correction-chance table | `python tune.py` (a few minutes) |
-| Stress | `python3 evaluate.py --agent agent.py --data tests/stress.jsonl` |
+| Stress | `python3 evaluate.py --agent agent.py --data tests/stress.jsonl` (the set is rebuilt, identically, by `python3 tests/stress_test.py`) |
 | Blind | `python3 evaluate.py --agent agent.py --data tests/blind.jsonl` |
 | Holdout (check it is unchanged first) | `python3 tests/make_holdout.py --check`, then `python3 evaluate.py --agent agent.py --data tests/holdout.jsonl` |
 | Ablation table and speed–safety chart | `python3 compare.py` → `results/ablation.{md,csv}`, `results/speed_safety.svg` |
@@ -128,7 +128,8 @@ Latency was measured on a MacBook Air (M4, 16 GB), Python 3.14.6: about 0.05 ms 
 ## Files
 `agent.py` (the agent; all settings in `CONFIG`) · `tune.py` · `compare.py` · `demo_app.py` ·
 `docs/ARCHITECTURE.md` · `docs/DETAILS.md` · `docs/FINALS_QA.md` ·
-`tests/` (stress, blind, frozen holdout and their generators) · `results/` · `dev_results.jsonl` (submitted dev log).
+`tests/` (stress, blind, frozen holdout and their generators) · `results/` (tables, chart, holdout report;
+per-request logs in `results/logs/`) · `dev_results.jsonl` (submitted dev log).
 
 Organisers' starter kit (unchanged): `evaluate.py` · `search.py` · `catalogue.csv` · `dev.jsonl` ·
 [`STARTER_KIT_README.md`](STARTER_KIT_README.md).

@@ -3,10 +3,10 @@
 **Run once on 2026-11-26. For honest reporting only. No changes were made to `agent.py` because of these results.**
 
 ## Setup checks
-- `tests/holdout.jsonl` SHA-256 = `0c8c7bfd59e42f1e4c881bb463278f4b988c447fcc7937dc49fc9bd615632e7c`, which matches the value recorded in CLAUDE.md. `python3 tests/make_holdout.py --check` printed "holdout matches generator".
-- `agent.py` is byte-for-byte the same as `agent_frozen_v3.py`.
-- Command (run once): `python3 evaluate.py --agent agent.py --data tests/holdout.jsonl --log results/holdout_v3.jsonl`
-- Full console output: `results/holdout_v3_stdout.txt`. Per-request log: `results/holdout_v3.jsonl`.
+- `tests/holdout.jsonl` SHA-256 = `0c8c7bfd59e42f1e4c881bb463278f4b988c447fcc7937dc49fc9bd615632e7c`, which matches the value recorded in our private project notes (`CLAUDE.md`, not in the public repo). `python3 tests/make_holdout.py --check` printed "holdout matches generator".
+- `agent.py` is byte-for-byte the same as `agent_frozen_v3.py` (frozen copy, kept privately in `_private/`, not in the public repo).
+- Command (run once): `python3 evaluate.py --agent agent.py --data tests/holdout.jsonl --log results/logs/holdout_v3.jsonl`
+- Full console output: `results/logs/holdout_v3_stdout.txt`. Per-request log: `results/logs/holdout_v3.jsonl`.
 
 ## Headline numbers (250 requests)
 
@@ -42,7 +42,7 @@ Filter accuracy at the last word: category 0.96, colour 0.93, size 0.99, brand 1
 | price_format | 30 | 1.000 | 0 | 12.3% | 47.4 |
 | typo | 20 | **0.800** | 0 | 2.5% | 33.5 |
 
-The 94 `order:*` tags (word order of the request) are in `results/holdout_v3_stdout.txt`. Their only failures are the 18 requests listed below.
+The 94 `order:*` tags (word order of the request) are in `results/logs/holdout_v3_stdout.txt`. Their only failures are the 18 requests listed below.
 
 ## Every failure, grouped
 

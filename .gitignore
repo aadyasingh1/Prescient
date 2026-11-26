@@ -6,6 +6,7 @@ __pycache__/
 .DS_Store
 
 # Private working copies of the agent (frozen fallbacks, backups, fix snapshots)
+_private/
 agent_backup.py
 agent_frozen_*.py
 agent_before_fixes.py
