@@ -5,8 +5,8 @@
 
 Standard library only, works offline (no CDN, no build step). Ctrl+C in the terminal stops it.
 
-Five tabs
----------
+Six tabs
+--------
   LIVE TYPE      type your own request; every time you press space, the finished word is
                  sent to a real Agent on this server (one agent per typing session).
                  Enter = the shopper has finished (the agent's finish() is called).
@@ -24,6 +24,14 @@ Five tabs
                  on all of dev.jsonl and then put back. Every slider move is a fresh run; the
                  page shows score, accuracy, wrong commits, earliness and a dot on a
                  speed-vs-safety chart. The server checks CONFIG is back to agent.py's values.
+  EXPLORER       browse every request of dev.jsonl or the frozen holdout (tests/holdout.jsonl),
+                 filter by tag and by outcome (committed early / committed late / wrong commit
+                 / wrong final), search the text. Outcomes and scores are READ from the saved
+                 evaluate.py logs (dev_results.jsonl, results/logs/holdout_v3.jsonl), never
+                 recomputed. Clicking a request replays it word by word through agent.py with
+                 the same pipeline view, next to the gold target and the agent's saved answer;
+                 the page says whether the replay matches the saved log. The holdout is only
+                 read: nothing here writes to it or feeds it back into agent.py.
 
 Nothing on screen is invented
 -----------------------------
@@ -55,6 +63,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import agent as A
 import compare                       # the Eager definition used in results/ablation.md
@@ -510,6 +519,149 @@ def results():
             "has_svg": (HERE / "results" / "speed_safety.svg").exists()}
 
 
+# ------------------------------------------------------------------------------------------
+# Explorer tab: browse every request of a dataset with its SAVED result, replay any one
+# ------------------------------------------------------------------------------------------
+# Each dataset = its request file + the per-request log that evaluate.py --log wrote for it.
+# The list, the outcome of each request and its score are read from that saved log, never
+# recomputed here. The holdout is only ever READ: nothing in this file writes to it or feeds
+# its results back into agent.py (see "Frozen holdout" in the project rules).
+EXPLORE_SOURCES = {
+    "dev": {"name": "Dev", "requests": "dev.jsonl", "log": "dev_results.jsonl",
+            "note": "The organisers' dev set. Saved log written by "
+                    "python3 evaluate.py --agent agent.py --log dev_results.jsonl"},
+    "holdout": {"name": "Holdout", "requests": "tests/holdout.jsonl",
+                "log": "results/logs/holdout_v3.jsonl",
+                "note": "Frozen holdout: run once, view only. Its failures are never used to "
+                        "change the agent. Saved log from the single v3 run (v4 gives the same "
+                        "results: see results/holdout_report.md)."},
+}
+OUTCOMES = {"early": "Committed early", "late": "Committed late",
+            "wrong_commit": "Wrong commit", "wrong_final": "Wrong final"}
+
+
+def read_jsonl(path):
+    with open(path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def outcome_flags(r):
+    """What happened to one request, read from its saved evaluate.py log line.
+
+    early        = final answer right, no wrong commit, the right product committed
+                   before the last word (evaluate.py gave earliness credit)
+    late         = final answer right, no wrong commit, but no earliness credit
+                   (committed only on the last word, or answered at the full stop)
+    wrong_commit = at least one committed product was not the target (−1.0 each)
+    wrong_final  = the final answer was not the target
+    """
+    flags = []
+    if r["correct"] and not r["wrong_commits"]:
+        flags.append("early" if r["early_words"] > 0 else "late")
+    if r["wrong_commits"]:
+        flags.append("wrong_commit")
+    if not r["correct"]:
+        flags.append("wrong_final")
+    return flags
+
+
+def holdout_hash_check():
+    """SHA-256 of tests/holdout.jsonl vs the value recorded in results/holdout_report.md."""
+    import hashlib
+    import re
+    try:
+        actual = hashlib.sha256((HERE / "tests" / "holdout.jsonl").read_bytes()).hexdigest()
+        report = (HERE / "results" / "holdout_report.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"SHA-256 = `([0-9a-f]{64})`", report)
+    return {"actual": actual, "recorded": m.group(1) if m else None,
+            "ok": bool(m) and m.group(1) == actual}
+
+
+def load_explore(key):
+    src = EXPLORE_SOURCES[key]
+    try:
+        requests = read_jsonl(HERE / src["requests"])
+        saved = {r["id"]: r for r in read_jsonl(HERE / src["log"])}
+    except OSError as exc:
+        return {"error": f"cannot read {exc.filename}: {exc.strerror}"}
+    rows = []
+    for req in requests:
+        r = saved.get(req["id"])
+        if r is None:
+            continue                          # no saved result: not shown (nothing is made up)
+        rows.append({
+            "id": req["id"], "text": req["text"], "n": len(req["words"]), "tags": req["tags"],
+            "target": req["target"], "final": r["final"], "commits": r["commits"],
+            "correct": r["correct"], "wrong_commits": r["wrong_commits"],
+            "early_words": r["early_words"], "early_share": r["early_share"],
+            "oracle_share": r["oracle_share"], "earliest": req.get("earliest"),
+            "searches": r["searches"], "score": r["score"], "outcome": outcome_flags(r),
+            "filters_gold": r["filters_gold"], "filters_reported": r["filters_reported"],
+        })
+    return {"key": key, "name": src["name"], "note": src["note"],
+            "requests_file": src["requests"], "log_file": src["log"],
+            "requests": requests, "rows": rows, "missing": len(requests) - len(rows),
+            "hash": holdout_hash_check() if key == "holdout" else None}
+
+
+EXPLORE = {}                                  # loaded on first use, then kept
+
+
+def explore_data(key):
+    if key not in EXPLORE_SOURCES:
+        return {"error": f"unknown dataset {key!r}"}
+    if key not in EXPLORE or "error" in EXPLORE[key]:
+        EXPLORE[key] = load_explore(key)
+    return EXPLORE[key]
+
+
+def explore_list(key):
+    d = explore_data(key)
+    if "error" in d:
+        return d
+    rows = d["rows"]
+    s = {"requests": len(rows),
+         "score": round(100 * sum(r["score"] for r in rows) / len(rows), 1) if rows else None}
+    return {k: d[k] for k in ("key", "name", "note", "requests_file", "log_file", "missing", "hash")} | {
+        "rows": rows, "summary": s, "outcomes": OUTCOMES,
+        "datasets": {k: v["name"] for k, v in EXPLORE_SOURCES.items()}}
+
+
+def explore_replay(key, rid):
+    """Replay one request word by word through agent.py (the same Recorder as EXAMPLES).
+
+    The words come from the request file, exactly as evaluate.py feeds them. The outcome
+    shown as "saved" comes from the saved log; the replay is only for the per-word view, and
+    the page says whether the replay's commits and final answer match the saved log.
+    """
+    d = explore_data(key)
+    if "error" in d:
+        return d
+    req = next((q for q in d["requests"] if q["id"] == rid), None)
+    row = next((r for r in d["rows"] if r["id"] == rid), None)
+    if req is None or row is None:
+        return {"error": f"request {rid!r} not found in {d['requests_file']}"}
+    words = list(req["words"])
+    with LOCK:
+        rec = Recorder()
+        for w in words:
+            rec.observe(w)
+        final = rec.finish()
+    replay_commits = [list(c) for c in final["commits"]]
+    saved_commits = [list(c) for c in row["commits"]]
+    for s in rec.steps:
+        s["wrong"] = bool(s["new_commit"]) and s["commit"] != req["target"]
+    return {"words": words, "steps": rec.steps, "final": final, "row": row,
+            "dataset": key, "dataset_name": d["name"], "log_file": d["log_file"],
+            "target_product": product_card(req["target"]),
+            "saved_final_product": product_card(row["final"]),
+            "replay": {"commits": replay_commits, "final": final["final"],
+                       "matches_saved": replay_commits == saved_commits
+                       and final["final"] == row["final"]}}
+
+
 def boot():
     return {"examples": EXAMPLES,
             "duel_examples": [{"name": e["name"], "text": e["text"], "target": e["target"],
@@ -519,7 +671,7 @@ def boot():
             "eager_config": {k: list(v) if isinstance(v, tuple) else v
                              for k, v in EAGER_CONFIG.items()},
             "tradeoff": [{"key": k, "name": n} for k, n, _, _ in TRADEOFF],
-            "dev_requests": len(DEV)}
+            "dev_requests": len(DEV), "explore_datasets": list(EXPLORE_SOURCES)}
 
 
 # ------------------------------------------------------------------------------------------
@@ -545,6 +697,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, page, "text/html; charset=utf-8")
         elif path == "/api/results":
             self._json(results())
+        elif path == "/api/explore":
+            q = parse_qs(urlparse(self.path).query)
+            self._json(explore_list(q.get("dataset", ["dev"])[0]))
         elif path == "/results/speed_safety.svg":          # the only file served from disk
             try:
                 self._send(200, (HERE / "results" / "speed_safety.svg").read_bytes(), "image/svg+xml")
@@ -564,6 +719,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(duel(text))
             if self.path == "/api/tradeoff":
                 return self._json(tradeoff(body.get("level", 2)))
+            if self.path == "/api/explore/replay":
+                return self._json(explore_replay(str(body.get("dataset", "")), str(body.get("id", ""))))
             if self.path == "/api/live":
                 return self._json(live(body.get("action"), body.get("session"), body.get("word")))
             self._send(404, "not found", "text/plain")
@@ -875,6 +1032,58 @@ tr.me .sbar{background:var(--go);opacity:1}
 svg.to-chart{width:100%;height:auto;display:block}
 #to-dot{transition:transform 450ms cubic-bezier(.2,.8,.2,1)}
 .view{display:none} .view.on{display:block}
+/* EXPLORER */
+.xp-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:16px}
+.seg{display:flex;gap:4px;background:var(--s1);border:1px solid var(--line2);border-radius:12px;padding:4px}
+.seg button{background:none;border:0;border-radius:9px;padding:8px 16px;font-size:16px;font-weight:600;color:var(--muted);cursor:pointer}
+.seg button.on{background:var(--ink);color:#000}
+.xp-bar select,.xp-bar input{background:var(--s1);border:1px solid var(--line2);border-radius:11px;padding:10px 14px;font-size:16px;outline:none;color:var(--ink)}
+.xp-bar input{flex:1;min-width:260px}
+.ochips{display:flex;gap:8px;flex-wrap:wrap}
+.ochip{border:1px solid var(--line2);background:var(--s1);border-radius:999px;padding:7px 14px;font-size:15px;font-weight:600;color:var(--ink2);cursor:pointer}
+.ochip b{font-family:var(--mono);margin-left:6px;color:var(--muted)}
+.ochip.on{border-color:var(--ink);color:var(--ink);background:var(--s2)}
+.ochip.early.on{border-color:var(--go);color:var(--go)} .ochip.late.on{border-color:var(--ink2)}
+.ochip.wrong_commit.on,.ochip.wrong_final.on{border-color:var(--red);color:var(--red)}
+.xp-note{margin-top:12px;font-size:15px;color:var(--ink2);background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:10px 16px}
+.xp-note.frozen{border-color:rgba(255,181,71,.45);background:var(--amb-bg)}
+.xp-note b{color:var(--ink)} .xp-note .ok{color:var(--go)} .xp-note .bad{color:var(--red)}
+.xp-sum{margin:12px 2px 6px;font-size:15px;color:var(--muted)}
+.xp-sum b{color:var(--ink2);font-family:var(--mono)}
+.xp-list{background:var(--s1);border:1.5px solid var(--line);border-radius:16px;max-height:calc(100vh - 360px);min-height:300px;overflow:auto}
+table.xp{width:100%;border-collapse:collapse;font-size:16px}
+table.xp th{position:sticky;top:0;background:var(--s2);text-align:left;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);padding:10px 12px;z-index:1}
+table.xp td{padding:9px 12px;border-top:1px solid var(--line);vertical-align:top}
+table.xp tr.r{cursor:pointer} table.xp tr.r:hover td{background:var(--s2)}
+table.xp td.id,table.xp td.n{font-family:var(--mono);white-space:nowrap;color:var(--ink2)}
+table.xp td.n{text-align:right} table.xp th.n{text-align:right}
+table.xp td.tx{color:var(--ink);line-height:1.35}
+table.xp mark{background:rgba(255,181,71,.3);color:inherit;border-radius:3px}
+.tg{display:inline-block;font-size:12px;color:var(--muted);border:1px solid var(--line2);border-radius:999px;padding:1px 8px;margin:3px 4px 0 0}
+.ob{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:7px;padding:3px 8px;margin:0 4px 3px 0;white-space:nowrap}
+.ob.early{background:var(--go-bg);color:var(--go)} .ob.late{background:var(--s2);color:var(--ink2);border:1px solid var(--line2)}
+.ob.wrong_commit,.ob.wrong_final{background:var(--red-bg);color:var(--red)}
+/* case card above the replay */
+.case{display:none;margin-top:10px;background:var(--s1);border:1.5px solid var(--line);border-radius:18px;padding:12px 20px}
+.case.show{display:block}
+.case-h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:15px;color:var(--muted)}
+.case-h .cid{font:700 18px var(--mono);color:var(--ink)}
+.case-g{display:grid;grid-template-columns:1fr 1fr 1.25fr;gap:12px;margin-top:10px}
+.case-g>div{background:var(--s2);border:1px solid var(--line);border-radius:14px;padding:10px 14px}
+.case-g .k{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.case-g .t{font-size:18px;font-weight:650;line-height:1.25}
+.case-g .m{font-size:14px;color:var(--ink2);margin-top:3px}
+.case-g .pid{font:600 14px var(--mono);color:var(--muted)}
+.case-g .ag.ok{border-color:rgba(62,224,143,.5)} .case-g .ag.bad{border-color:var(--red)}
+.case-g .verdict{font-weight:700;font-size:14px;margin-top:4px} .verdict.ok{color:var(--go)} .verdict.bad{color:var(--red)}
+table.fs{width:100%;border-collapse:collapse;font-size:14px}
+table.fs td{padding:2px 6px 2px 0;color:var(--ink2);white-space:nowrap}
+table.fs td.k2{color:var(--muted)} table.fs td.bad{color:var(--red);font-weight:700}
+.case-f{font-size:14px;color:var(--muted);margin-top:8px}
+.case-f .ok{color:var(--go)} .case-f .bad{color:var(--red)} .case-f b{color:var(--ink2)}
+.reveal.bad{border-color:var(--red);background:var(--red-bg)}
+.reveal.bad .kick,.reveal.bad .found em{color:var(--red)}
+.fin .gold{color:var(--muted)}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
 .err{color:var(--red);font-size:18px}
 </style></head>
@@ -892,6 +1101,7 @@ svg.to-chart{width:100%;height:auto;display:block}
     <button data-v="duel">STRATEGY DUEL<kbd>3</kbd></button>
     <button data-v="results">RESULTS<kbd>4</kbd></button>
     <button data-v="tradeoff">TRADE-OFF<kbd>5</kbd></button>
+    <button data-v="explore">EXPLORER<kbd>6</kbd></button>
   </nav>
 </header>
 
@@ -899,6 +1109,7 @@ svg.to-chart{width:100%;height:auto;display:block}
 <section class="view on" id="v-single">
   <div class="bar" id="bar-examples">
     <span id="ex-buttons" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+    <button class="btn" id="xp-back" style="display:none">&larr; All requests</button>
     <span class="sep"></span>
     <button class="btn primary" id="play">&#9654;&nbsp; Play</button>
     <button class="btn" id="next">Next word &rarr;</button>
@@ -916,6 +1127,7 @@ svg.to-chart{width:100%;height:auto;display:block}
     </div>
   </div>
 
+  <div class="case" id="case"></div>
   <div class="stream" id="stream"></div>
   <div class="banner-slot"><div class="banner" id="banner"></div></div>
 
@@ -1031,6 +1243,20 @@ svg.to-chart{width:100%;height:auto;display:block}
   <div class="src" id="to-src"></div>
 </section>
 
+<!-- ===================== EXPLORER ===================== -->
+<section class="view" id="v-explore">
+  <div class="xp-bar">
+    <div class="seg" id="xp-ds"></div>
+    <select id="xp-tag" aria-label="Filter by tag"></select>
+    <input id="xp-q" placeholder="Search the request text or id…" spellcheck="false" autocomplete="off">
+  </div>
+  <div class="xp-bar"><div class="ochips" id="xp-out"></div></div>
+  <div class="xp-note" id="xp-note"></div>
+  <div class="xp-sum" id="xp-sum"></div>
+  <div class="xp-list"><table class="xp" id="xp-table"></table></div>
+  <div class="src" id="xp-src"></div>
+</section>
+
 </div>
 <script>
 const B = __BOOT__;
@@ -1094,8 +1320,8 @@ function applyStep(s) {
   if (s.corrections.length) for (const j of s.span) $("w" + j)?.classList.add("fix");
   if (s.new_commit) {
     document.querySelectorAll("#stream .w.commit").forEach(e => { e.classList.remove("commit"); e.classList.add("old-commit"); e.querySelector(".flag")?.remove(); });
-    we.classList.add("commit");
-    we.insertAdjacentHTML("beforeend", `<span class="flag">COMMIT</span>`);
+    we.classList.add(s.wrong ? "wrongc" : "commit");             // s.wrong: Explorer only, vs the gold target
+    we.insertAdjacentHTML("beforeend", `<span class="flag">${s.wrong ? "WRONG" : "COMMIT"}</span>`);
   }
   // 2. correction banner
   if (s.corrections.length) {
@@ -1174,6 +1400,10 @@ function showReveal(s, i) {
     `<div><div class="k">Confidence</div><div class="bigv">${pct(s.confidence)}<small>needs ${pct(B.threshold)}</small></div></div>` +
     `<div><div class="k">Searches used</div><div class="bigv">${s.searches}<small>counted</small></div></div>`;
   $("rv-fin").innerHTML = "";
+  if (MODE === "explore" && XP.cur && s.commit !== XP.cur.row.target) {      // compared with the gold target
+    rv.classList.add("bad");
+    $("rv-kick").textContent = `Wrong commit · not the gold target ${XP.cur.row.target} · −1.0`;
+  }
   later(rv, "in");
   revealIntoView();
 }
@@ -1201,7 +1431,7 @@ function showFinal(f) {
     $("rv-receipt").innerHTML = `<div><div class="k">Filters at the end</div><div class="v">${SLOTS.filter(([k]) => f.values[k] != null).map(([k]) => `<b>${esc(cap(f.values[k]))}</b>`).join(" · ")}</div></div>` +
       `<div><div class="k">Why no early commit</div><div class="v">${esc(V.steps.length ? (V.steps[V.steps.length - 1].waiting || "") : "")}</div></div>` +
       `<div><div class="k">Words</div><div class="bigv">${f.words}</div></div><div><div class="k">Searches used</div><div class="bigv">${f.searches}<small>counted</small></div></div>`;
-    $("rv-fin").innerHTML = "";
+    $("rv-fin").innerHTML = goldLine(f.final);
     later(rv, "in");
     revealIntoView();
     return;
@@ -1209,7 +1439,13 @@ function showFinal(f) {
   const same = f.commits.length && f.commits[f.commits.length - 1][1] === f.final;
   $("rv-fin").innerHTML = `Full stop · final answer <b>${esc(f.final)}</b> ` +
     (same ? `<span class="ok">✓ the product it committed to</span>` : `<span class="bad">differs from its last commit</span>`) +
-    ` · ${plural(f.searches, "search")} in total`;
+    ` · ${plural(f.searches, "search")} in total` + (goldLine(f.final) ? " · " + goldLine(f.final) : "");
+}
+function goldLine(final) {               // Explorer only: the final answer against the gold target
+  if (MODE !== "explore" || !XP.cur) return "";
+  const t = XP.cur.row.target;
+  return final === t ? `<span class="ok">✓ matches the gold target ${esc(t)}</span>`
+                     : `<span class="bad">✗ gold target was ${esc(t)}</span>`;
 }
 
 /* chart: products left (log) + confidence, per word — straight from the steps */
@@ -1248,7 +1484,7 @@ async function loadExample(autoplay) {
   const text = B.examples[EX.idx].text;
   const d = await post("/api/run", {text});
   if (d.error) { $("stream").innerHTML = `<span class="err">${esc(d.error)}</span>`; return; }
-  EX.data = d; resetView(d.words);
+  EX.data = d; EX.source = "example"; resetView(d.words);
   if (autoplay) playEx();
 }
 function exNext() {
@@ -1591,30 +1827,156 @@ async function loadTradeoff() {
 $("to-range").oninput = () => toMove(120);
 
 /* ============================== tabs + keys ============================== */
+/* ============================== EXPLORER ============================== */
+// Every row, outcome and score below comes from the dataset's saved evaluate.py log
+// (/api/explore). Clicking a row replays that request through agent.py (/api/explore/replay)
+// for the word-by-word view; the case card says whether the replay matches the saved log.
+const XP = { ds: "dev", data: {}, tag: "", out: new Set(), q: "", replay: false, cur: null };
+const OUT_ORDER = ["early", "late", "wrong_commit", "wrong_final"];
+async function loadExplore(ds) {
+  XP.ds = ds;
+  if (!XP.data[ds]) {
+    $("xp-table").innerHTML = `<tr><td class="hint">Loading…</td></tr>`;
+    const d = await fetch("/api/explore?dataset=" + encodeURIComponent(ds)).then(x => x.json());
+    if (d.error) { $("xp-table").innerHTML = `<tr><td class="err">${esc(d.error)}</td></tr>`; return; }
+    XP.data[ds] = d;
+  }
+  const d = XP.data[ds];
+  $("xp-ds").innerHTML = Object.entries(d.datasets).map(([k, n]) =>
+    `<button data-k="${k}" class="${k === ds ? "on" : ""}">${esc(n)}</button>`).join("");
+  $("xp-ds").querySelectorAll("button").forEach(b => b.onclick = () => { XP.tag = ""; loadExplore(b.dataset.k); });
+  // tags: the "order:…" tags of the holdout are one per word order, too many for a menu
+  const tags = {};
+  for (const r of d.rows) for (const t of r.tags) if (!t.startsWith("order:")) tags[t] = (tags[t] || 0) + 1;
+  const none = d.rows.filter(r => !r.tags.length).length;
+  if (XP.tag && XP.tag !== "(none)" && !tags[XP.tag]) XP.tag = "";
+  $("xp-tag").innerHTML = `<option value="">All tags</option>` +
+    Object.keys(tags).sort().map(t => `<option value="${esc(t)}">${esc(t)} (${tags[t]})</option>`).join("") +
+    (none ? `<option value="(none)">no tag (${none})</option>` : "");
+  $("xp-tag").value = XP.tag;
+  const h = d.hash;
+  $("xp-note").className = "xp-note" + (ds === "holdout" ? " frozen" : "");
+  $("xp-note").innerHTML = `<b>${esc(d.name)}.</b> ${esc(d.note)}` + (h ? ` · SHA-256 of ${esc(d.requests_file)}: ` +
+    (h.ok ? `<span class="ok">✓ matches the value recorded in results/holdout_report.md</span>`
+          : `<span class="bad">✗ does not match the recorded value</span>`) : "");
+  $("xp-src").textContent = `requests: ${d.requests_file} · saved results: ${d.log_file}` +
+    (d.missing ? ` · ${d.missing} request(s) have no saved result and are not shown` : "");
+  renderExplore();
+}
+function xpRows() {
+  const d = XP.data[XP.ds], q = XP.q.trim().toLowerCase();
+  return d.rows.filter(r =>
+    (!XP.tag || (XP.tag === "(none)" ? !r.tags.length : r.tags.includes(XP.tag))) &&
+    (!XP.out.size || r.outcome.some(o => XP.out.has(o))) &&
+    (!q || r.text.toLowerCase().includes(q) || r.id.toLowerCase().includes(q)));
+}
+function hl(text) {
+  const q = XP.q.trim();
+  if (!q) return esc(text);
+  const i = text.toLowerCase().indexOf(q.toLowerCase());
+  return i < 0 ? esc(text) : esc(text.slice(0, i)) + `<mark>${esc(text.slice(i, i + q.length))}</mark>` + esc(text.slice(i + q.length));
+}
+const obadge = o => `<span class="ob ${o}">${esc(XP.data[XP.ds].outcomes[o])}</span>`;
+function renderExplore() {
+  const d = XP.data[XP.ds]; if (!d) return;
+  // outcome chip counts follow the tag and text filters (not the outcome filter itself)
+  const base = d.rows.filter(r => (!XP.tag || (XP.tag === "(none)" ? !r.tags.length : r.tags.includes(XP.tag))) &&
+    (!XP.q.trim() || r.text.toLowerCase().includes(XP.q.trim().toLowerCase()) || r.id.toLowerCase().includes(XP.q.trim().toLowerCase())));
+  $("xp-out").innerHTML = OUT_ORDER.map(o => `<button class="ochip ${o}${XP.out.has(o) ? " on" : ""}" data-o="${o}">${esc(d.outcomes[o])}<b>${base.filter(r => r.outcome.includes(o)).length}</b></button>`).join("");
+  $("xp-out").querySelectorAll("button").forEach(b => b.onclick = () => { const o = b.dataset.o; XP.out.has(o) ? XP.out.delete(o) : XP.out.add(o); renderExplore(); });
+  const rows = xpRows(), n = rows.length;
+  const score = n ? (100 * rows.reduce((a, r) => a + r.score, 0) / n).toFixed(1) : "–";
+  const acc = n ? (100 * rows.filter(r => r.correct).length / n).toFixed(1) + "%" : "–";
+  const wc = rows.reduce((a, r) => a + r.wrong_commits, 0);
+  const early = n ? (100 * rows.reduce((a, r) => a + r.early_share, 0) / n).toFixed(1) + "%" : "–";
+  $("xp-sum").innerHTML = `Showing <b>${n}</b> of <b>${d.rows.length}</b> requests · saved results for these: score <b>${score}</b> · accuracy <b>${acc}</b> · wrong commits <b>${wc}</b> · earliness <b>${early}</b>` +
+    (n ? " · click a request to replay it word by word" : "");
+  $("xp-table").innerHTML = `<tr><th>ID</th><th>Request</th><th>Outcome</th><th class="n">First commit</th><th class="n">Score</th></tr>` +
+    (n ? rows.map(r => {
+      const fc = r.commits.length ? `word ${r.commits[0][0]} / ${r.n}` : `— / ${r.n}`;
+      return `<tr class="r" data-id="${esc(r.id)}"><td class="id">${esc(r.id)}</td>` +
+        `<td class="tx">${hl(r.text)}<div>${r.tags.filter(t => !t.startsWith("order:")).map(t => `<span class="tg">${esc(t)}</span>`).join("")}</div></td>` +
+        `<td>${r.outcome.map(obadge).join("")}</td><td class="n">${fc}</td>` +
+        `<td class="n" style="color:${r.score < 0 ? "var(--red)" : "inherit"}">${r.score >= 0 ? "+" : "−"}${Math.abs(r.score).toFixed(2)}</td></tr>`;
+    }).join("") : `<tr><td colspan="5" class="hint">No request matches these filters.</td></tr>`);
+  $("xp-table").querySelectorAll("tr.r").forEach(tr => tr.onclick = () => openReplay(XP.ds, tr.dataset.id, true));
+}
+$("xp-tag").onchange = () => { XP.tag = $("xp-tag").value; renderExplore(); };
+$("xp-q").oninput = () => { XP.q = $("xp-q").value; renderExplore(); };
+
+const prodLine = p => p ? `<div class="t">${esc(p.title)}</div><div class="m">${esc([p.brand, cap(p.colour), p.size ? "size " + p.size : null, cap(p.category), rupees(p.price)].filter(Boolean).join(" · "))}</div><div class="pid">${esc(p.product_id)}</div>`
+                        : `<div class="t">No product</div>`;
+function caseCard(c) {
+  const r = c.row, right = r.correct;
+  const fg = r.filters_gold || {}, fr = r.filters_reported || {};
+  const fv = (k, v) => v == null ? "—" : (k === "max_price" ? rupees(v) : String(v));
+  const frows = SLOTS.map(([k, n]) => {
+    const same = String(fg[k] ?? "").toLowerCase() === String(fr[k] ?? "").toLowerCase();
+    return `<tr><td class="k2">${esc(n)}</td><td>${esc(fv(k, fg[k]))}</td><td class="${same ? "" : "bad"}">${esc(fv(k, fr[k]))}</td></tr>`;
+  }).join("");
+  const commits = r.commits.length ? r.commits.map(([t, p]) => `<b>${esc(p)}</b> at word ${t}${p === r.target ? ` <span class="ok">✓</span>` : ` <span class="bad">✗ wrong (−1.0)</span>`}`).join(" → ") : "none (answered at the full stop)";
+  const oracle = r.earliest != null ? ` · earliest safe word ${r.earliest} of ${r.n}` : "";
+  $("case").innerHTML = `
+    <div class="case-h"><span class="cid">${esc(r.id)}</span><span class="pill">${esc(c.dataset_name)}</span>${r.outcome.map(obadge).join("")}
+      ${r.tags.filter(t => !t.startsWith("order:")).map(t => `<span class="tg">${esc(t)}</span>`).join("")}
+      <span>saved score <b class="num" style="color:var(--ink)">${r.score >= 0 ? "+" : "−"}${Math.abs(r.score).toFixed(2)}</b></span></div>
+    <div class="case-g">
+      <div><div class="k">Gold target</div>${prodLine(c.target_product)}</div>
+      <div class="ag ${right ? "ok" : "bad"}"><div class="k">Agent's final answer (saved)</div>${prodLine(c.saved_final_product)}
+        <div class="verdict ${right ? "ok" : "bad"}">${right ? "✓ right" : "✗ wrong final answer"}</div></div>
+      <div><div class="k">Filters · gold vs agent's last report</div><table class="fs"><tr><td></td><td class="k2">gold</td><td class="k2">agent</td></tr>${frows}</table></div>
+    </div>
+    <div class="case-f">Saved commits: ${commits}${oracle} · ${plural(r.searches, "search")} ·
+      replay through agent.py now: ${c.replay.matches_saved ? `<span class="ok">✓ same commits and final answer as the saved log</span>`
+        : `<span class="bad">✗ differs from the saved log (replay final ${esc(c.replay.final || "none")})</span>`}
+      <span class="src" style="margin-left:6px">${esc(c.log_file)}</span></div>`;
+}
+async function openReplay(ds, id, autoplay) {
+  stopEx();
+  const c = await post("/api/explore/replay", {dataset: ds, id});
+  if (c.error) { XP.replay = false; setMode("explore"); $("xp-sum").innerHTML = `<span class="err">${esc(c.error)}</span>`; return; }
+  if (!XP.data[ds]) await loadExplore(ds);
+  XP.ds = ds; XP.cur = c; XP.replay = true;
+  setMode("explore");
+  EX.data = {words: c.words, steps: c.steps, final: c.final}; EX.source = "explore";
+  caseCard(c);
+  resetView(c.words);
+  if (autoplay) playEx();
+}
+function xpBack() { stopEx(); XP.replay = false; XP.cur = null; setMode("explore"); }
+$("xp-back").onclick = xpBack;
+
 let MODE = "examples";
 function setMode(m, noLoad) {
   MODE = m;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.v === m));
-  $("v-single").classList.toggle("on", m === "live" || m === "examples");
+  const replay = m === "explore" && XP.replay;             // Explorer: list view or one replay
+  $("v-single").classList.toggle("on", m === "live" || m === "examples" || replay);
   $("v-duel").classList.toggle("on", m === "duel");
   $("v-results").classList.toggle("on", m === "results");
   $("v-tradeoff").classList.toggle("on", m === "tradeoff");
-  $("bar-examples").style.display = m === "examples" ? "" : "none";
+  $("v-explore").classList.toggle("on", m === "explore" && !replay);
+  $("bar-examples").style.display = m === "examples" || replay ? "" : "none";
+  $("ex-buttons").style.display = replay ? "none" : "flex";
+  $("xp-back").style.display = replay ? "" : "none";
+  $("case").classList.toggle("show", replay);
   $("bar-live").style.display = m === "live" ? "" : "none";
   stopEx(); stopDuel(); if (m !== "live") voiceStop(false);
-  if (m === "examples" && !noLoad) { if (EX.data) resetView(EX.data.words); else loadExample(false); }
+  if (m === "examples" && !noLoad) { if (EX.data && EX.source === "example") resetView(EX.data.words); else loadExample(false); }
+  if (m === "explore" && !replay) loadExplore(XP.ds);
   if (m === "live") { $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]); setTimeout(() => $("live-in").focus(), 50); }
   if (m === "duel" && !D.data && !noLoad) loadDuel(false);
   if (m === "results") loadResults();
   if (m === "tradeoff") loadTradeoff();
 }
-document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => setMode(b.dataset.v));
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => { XP.replay = false; setMode(b.dataset.v); });
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "INPUT") return;
-  if (["1","2","3","4","5"].includes(e.key)) setMode(["live","examples","duel","results","tradeoff"][+e.key - 1]);
+  if (["1","2","3","4","5","6"].includes(e.key)) { XP.replay = false; setMode(["live","examples","duel","results","tradeoff","explore"][+e.key - 1]); }
+  if (e.key === "Escape" && MODE === "explore" && XP.replay) xpBack();
   if (e.key === " " || e.key === "ArrowRight") {
     e.preventDefault();
-    if (MODE === "examples") (e.key === " " ? $("play") : $("next")).click();
+    if (MODE === "examples" || (MODE === "explore" && XP.replay)) (e.key === " " ? $("play") : $("next")).click();
     if (MODE === "duel") (e.key === " " ? $("d-play") : $("d-next")).click();
   }
 });
@@ -1626,8 +1988,13 @@ speedLabel($("speed"), $("speedv")); speedLabel($("d-speed"), $("d-speedv"));
 exButtons(); duelButtons(); buildChips();
 // Optional deep links (handy for recording): #live  #examples/1  #examples/1/play  #duel/0/play  #results  #tradeoff
 (async () => {
-  const [m, k, act] = location.hash.replace("#", "").split("/");
-  const mode = ["live", "examples", "duel", "results", "tradeoff"].includes(m) ? m : "examples";
+  const [m, k, act, act2] = location.hash.replace("#", "").split("/");
+  const mode = ["live", "examples", "duel", "results", "tradeoff", "explore"].includes(m) ? m : "examples";
+  if (mode === "explore") {               // #explore  #explore/holdout  #explore/dev/dev-0003/play
+    if (k && B.explore_datasets.includes(k)) XP.ds = k;
+    if (act) { await openReplay(XP.ds, decodeURIComponent(act), act2 === "play"); return; }
+    setMode("explore"); return;
+  }
   if (mode === "examples" && k != null) { EX.idx = Math.min(+k || 0, B.examples.length - 1); exButtons(); }
   if (mode === "duel" && k != null) { D.idx = Math.min(+k || 0, B.duel_examples.length - 1); duelButtons(); }
   setMode(mode, act === "play");
