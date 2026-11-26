@@ -1,0 +1,112 @@
+agent               agent.py
+requests            250   (holdout.jsonl)
+accuracy            0.980   (baseline 0.548)
+wrong commits       13 in 13 requests
+earliness           0.88 words before the end (6.2% of the request, best possible 11.3%)
+searches/request    1.08   (wasted 0.08)
+latency             0.05 ms/word, p95 0.43 ms
+SCORE               37.6   (baseline 21.2)
+
+by tag              n    accuracy  wrong  earliness  score
+  broad               10    0.900      0      7.6%    40.6
+  code_mixed          25    1.000      0     11.8%    47.1
+  correction          90    1.000     13      3.7%    27.3
+  correction_1        65    1.000     13      3.9%    22.1
+  correction_2        15    1.000      0      2.5%    40.7
+  correction_3        10    1.000      0      4.0%    41.2
+  correction_after_polite   20    1.000      7      1.2%     5.6
+  correction_at_end   23    1.000      6      4.8%    16.2
+  has_price          181    0.989     12      7.0%    37.0
+  informal            20    1.000      0     11.2%    46.7
+  late_constraint     25    1.000      0      0.4%    40.2
+  order:brand-category-colour-price    2    1.000      0      7.7%    43.6
+  order:brand-category-colour-price-size    5    1.000      0      3.4%    42.0
+  order:brand-category-colour-size    3    1.000      0      8.3%    45.0
+  order:brand-category-colour-size-price    2    1.000      0     13.4%    48.0
+  order:brand-category-price-colour    2    1.000      0      2.9%    41.8
+  order:brand-category-price-colour-size    5    1.000      0      3.1%    41.4
+  order:brand-category-price-size    2    1.000      0      0.0%    40.0
+  order:brand-category-price-size-colour    4    1.000      0      3.8%    42.2
+  order:brand-category-size-colour   11    1.000      0      8.7%    45.2
+  order:brand-category-size-colour-price    3    1.000      1      8.6%    11.2
+  order:brand-category-size-price-colour    2    1.000      0      0.0%    40.0
+  order:brand-colour-category-price    6    1.000      2     13.3%    14.0
+  order:brand-colour-category-price-size    5    1.000      0      0.0%    40.0
+  order:brand-colour-category-size    9    1.000      0      0.0%    39.1
+  order:brand-colour-category-size-price    7    1.000      0      9.0%    45.1
+  order:category-brand-colour-price-size    2    1.000      0      0.0%    40.0
+  order:category-brand-price-size-colour    1    1.000      0      0.0%    40.0
+  order:category-brand-size-colour    1    1.000      0      0.0%    40.0
+  order:category-brand-size-price    1    1.000      0     20.0%    52.0
+  order:category-brand-size-price-colour    1    1.000      0      0.0%    40.0
+  order:category-colour-brand-size    1    1.000      0      0.0%    40.0
+  order:category-colour-brand-size-price    1    1.000      0     11.1%    46.7
+  order:category-colour-price-brand-size    2    1.000      0      0.0%    40.0
+  order:category-colour-price-size-brand    1    1.000      0      0.0%    40.0
+  order:category-colour-size-brand    1    1.000      0      0.0%    40.0
+  order:category-colour-size-price    2    1.000      0      0.0%    40.0
+  order:category-colour-size-price-brand    2    1.000      0      0.0%    40.0
+  order:category-price-colour-brand-size    3    1.000      1      0.0%     6.7
+  order:category-price-colour-size-brand    2    1.000      0      0.0%    40.0
+  order:category-price-size-brand-colour    2    1.000      0      0.0%    39.0
+  order:category-price-size-colour    2    1.000      1      0.0%   -10.0
+  order:category-price-size-colour-brand    2    1.000      0      5.6%    43.3
+  order:category-size-brand-colour    1    1.000      0     18.2%    50.9
+  order:category-size-colour    1    1.000      0      0.0%    40.0
+  order:category-size-colour-price    1    0.000      0      0.0%     0.0
+  order:category-size-price-colour    2    1.000      0      6.5%    43.9
+  order:colour-brand-category-price    4    1.000      0     12.5%    47.5
+  order:colour-brand-category-price-size   12    1.000      1      0.4%    31.8
+  order:colour-brand-category-size    9    1.000      0      2.9%    41.1
+  order:colour-brand-category-size-price    9    1.000      0     20.8%    52.5
+  order:colour-category-brand    1    1.000      0      0.0%    40.0
+  order:colour-category-brand-price    1    1.000      0      0.0%    40.0
+  order:colour-category-brand-price-size    2    1.000      0      8.8%    45.3
+  order:colour-category-brand-size    5    1.000      0      0.0%    40.0
+  order:colour-category-brand-size-price    2    1.000      1     11.5%    -3.1
+  order:colour-category-price-brand    1    1.000      0      0.0%    40.0
+  order:colour-category-price-brand-size    3    1.000      1      3.3%     8.7
+  order:colour-category-price-size    8    1.000      0      1.5%    40.4
+  order:colour-category-price-size-brand    2    1.000      1      0.0%   -10.0
+  order:colour-category-size    3    1.000      0      0.0%    40.0
+  order:colour-category-size-brand    6    1.000      1      4.5%    26.1
+  order:colour-category-size-brand-price    3    1.000      0      5.9%    43.5
+  order:colour-category-size-price   10    1.000      1     12.2%    37.1
+  order:colour-category-size-price-brand    5    1.000      1      8.7%    24.4
+  order:price-brand-category-colour-size    1    1.000      1      0.0%   -60.0
+  order:price-brand-category-size-colour    1    1.000      0      0.0%    40.0
+  order:price-brand-colour-category    1    1.000      0      0.0%    40.0
+  order:price-brand-colour-category-size    3    1.000      0      6.2%    43.8
+  order:price-category-brand-size-colour    1    1.000      0      5.3%    43.2
+  order:price-category-colour-size    1    1.000      0      0.0%    40.0
+  order:price-category-size-colour    2    1.000      0      0.0%    40.0
+  order:price-category-size-colour-brand    1    1.000      0      0.0%    40.0
+  order:price-colour-brand-category-size    2    1.000      0      6.0%    43.6
+  order:price-colour-category-brand    1    1.000      0      0.0%    40.0
+  order:price-colour-category-brand-size    1    1.000      0      0.0%    40.0
+  order:price-colour-category-size    2    1.000      0      0.0%    40.0
+  order:price-colour-category-size-brand    2    1.000      0      0.0%    40.0
+  order:size-brand-category-colour    1    1.000      0      0.0%    40.0
+  order:size-brand-category-colour-price    1    1.000      0     20.0%    52.0
+  order:size-brand-category-price-colour    1    1.000      0      0.0%    40.0
+  order:size-brand-colour-category    2    1.000      0      6.6%    44.0
+  order:size-brand-colour-category-price    7    0.857      0     20.8%    46.8
+  order:size-category-brand-colour    1    1.000      0      0.0%    40.0
+  order:size-category-colour    1    1.000      0      0.0%    40.0
+  order:size-category-colour-price    1    1.000      0     16.7%    50.0
+  order:size-category-price-colour    1    1.000      0      6.7%    44.0
+  order:size-colour-brand-category    4    0.500      0      0.0%    20.0
+  order:size-colour-brand-category-price    5    1.000      0     20.3%    52.2
+  order:size-colour-category    1    1.000      0     16.7%    50.0
+  order:size-colour-category-brand    3    1.000      0      4.3%    42.6
+  order:size-colour-category-brand-price    1    1.000      0     15.4%    49.2
+  order:size-colour-category-price    4    1.000      0     22.9%    53.7
+  order:size-price-brand-category-colour    1    1.000      0      0.0%    40.0
+  order_variation     30    1.000      0      6.5%    43.9
+  price_format        30    1.000      0     12.3%    47.4
+  typo                20    0.800      0      2.5%    33.5
+
+filters you reported at the last word, vs the gold ones (250 requests):
+  category 0.96  colour 0.93  size 0.99  brand 1.00  max_price 0.96
+
+per-request results: results/holdout_v3.jsonl

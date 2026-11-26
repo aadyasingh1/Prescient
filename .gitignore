@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Private working copies of the agent (frozen fallbacks, backups, fix snapshots)
+agent_backup.py
+agent_frozen_*.py
+agent_before_fixes.py
+agent_after_fix*.py
+
+# Private project notes for the coding assistant
+CLAUDE.md
+.claude/
+
+# Scratch / temp files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+scratch/
+tmp/
+temp/

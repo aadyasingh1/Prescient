@@ -1,0 +1,43 @@
+correction hazard (words quiet -> P(wrong), n):
+  0: 0.058  (n=545)
+  1: 0.015  (n=168)
+  2: 0.004  (n=141)
+  3: 0.005  (n=100)
+  4: 0.017  (n=28)
+
+full-dev grid (score / wrong commits / earliness):
+  threshold 0.50 quiet 0:   43.0  wrong 21  early 16.7%
+  threshold 0.50 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.50 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.50 quiet 3:   43.5  wrong  0  early 5.9%
+  threshold 0.60 quiet 0:   43.0  wrong 21  early 16.7%
+  threshold 0.60 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.60 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.60 quiet 3:   43.5  wrong  0  early 5.9%
+  threshold 0.70 quiet 0:   43.0  wrong 21  early 16.7%
+  threshold 0.70 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.70 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.70 quiet 3:   43.5  wrong  0  early 5.9%
+  threshold 0.80 quiet 0:   43.0  wrong 21  early 16.7%
+  threshold 0.80 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.80 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.80 quiet 3:   43.5  wrong  0  early 5.9%
+  threshold 0.85 quiet 0:   43.0  wrong 21  early 16.7%
+  threshold 0.85 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.85 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.85 quiet 3:   43.5  wrong  0  early 5.9%
+  threshold 0.90 quiet 0:   43.0  wrong 21  early 16.7%
+  threshold 0.90 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.90 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.90 quiet 3:   43.5  wrong  0  early 5.9%
+  threshold 0.95 quiet 0:   45.9  wrong  0  early 10.0%
+  threshold 0.95 quiet 1:   45.9  wrong  0  early 10.0%
+  threshold 0.95 quiet 2:   44.4  wrong  0  early 7.5%
+  threshold 0.95 quiet 3:   43.5  wrong  0  early 5.9%
+fold 0: picked threshold 0.5 quiet 1 -> held-out 47.6  wrong 0
+fold 1: picked threshold 0.5 quiet 1 -> held-out 45.2  wrong 0
+fold 2: picked threshold 0.5 quiet 1 -> held-out 46.2  wrong 0
+fold 3: picked threshold 0.5 quiet 1 -> held-out 45.7  wrong 0
+fold 4: picked threshold 0.5 quiet 1 -> held-out 45.0  wrong 0
+
+cross-validated score: 45.9 +- 1.0

@@ -1,0 +1,7 @@
+strategy,score,accuracy,wrong_commits,earliness_pct,searches_per_request
+1 baseline,20.0,0.527,0,0.0,1.53
+2 eager,43.0,1.0,21,16.7,1.03
+3 neutral-word wait (1 word),44.4,1.0,0,7.3,1.03
+4 neutral-word wait (2 words),41.7,1.0,0,3.0,1.03
+5 naive delay (any word counts),44.0,1.0,5,9.5,1.03
+6 prescient (full agent),45.9,1.0,0,10.0,1.03

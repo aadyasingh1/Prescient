@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1110" height="500" viewBox="0 0 1110 500" font-family="Helvetica, Arial, sans-serif" font-size="12">
+<rect width="1110" height="500" fill="white"/>
+<text x="555.0" y="28" text-anchor="middle" font-size="17" font-weight="bold">Speed vs safety: earliness vs wrong commits</text>
+<text x="555.0" y="48" text-anchor="middle" fill="#555">Best corner: bottom right (early, no wrong commits). A wrong commit costs 1.0 point; full earliness is worth at most 0.6.</text>
+<text x="290.0" y="78" text-anchor="middle" font-size="14" font-weight="bold">dev (300 requests)</text>
+<line x1="80.0" y1="90" x2="80.0" y2="430" stroke="#eee"/>
+<line x1="80" y1="430.0" x2="500" y2="430.0" stroke="#eee"/>
+<text x="80.0" y="446" text-anchor="middle" fill="#444">0</text>
+<text x="74" y="434.0" text-anchor="end" fill="#444">0</text>
+<line x1="164.0" y1="90" x2="164.0" y2="430" stroke="#eee"/>
+<line x1="80" y1="362.0" x2="500" y2="362.0" stroke="#eee"/>
+<text x="164.0" y="446" text-anchor="middle" fill="#444">5</text>
+<text x="74" y="366.0" text-anchor="end" fill="#444">5</text>
+<line x1="248.0" y1="90" x2="248.0" y2="430" stroke="#eee"/>
+<line x1="80" y1="294.0" x2="500" y2="294.0" stroke="#eee"/>
+<text x="248.0" y="446" text-anchor="middle" fill="#444">10</text>
+<text x="74" y="298.0" text-anchor="end" fill="#444">10</text>
+<line x1="332.0" y1="90" x2="332.0" y2="430" stroke="#eee"/>
+<line x1="80" y1="226.0" x2="500" y2="226.0" stroke="#eee"/>
+<text x="332.0" y="446" text-anchor="middle" fill="#444">15</text>
+<text x="74" y="230.0" text-anchor="end" fill="#444">15</text>
+<line x1="416.0" y1="90" x2="416.0" y2="430" stroke="#eee"/>
+<line x1="80" y1="158.0" x2="500" y2="158.0" stroke="#eee"/>
+<text x="416.0" y="446" text-anchor="middle" fill="#444">20</text>
+<text x="74" y="162.0" text-anchor="end" fill="#444">20</text>
+<line x1="500.0" y1="90" x2="500.0" y2="430" stroke="#eee"/>
+<line x1="80" y1="90.0" x2="500" y2="90.0" stroke="#eee"/>
+<text x="500.0" y="446" text-anchor="middle" fill="#444">25</text>
+<text x="74" y="94.0" text-anchor="end" fill="#444">25</text>
+<rect x="80" y="90" width="420" height="340" fill="none" stroke="#999"/>
+<text x="290.0" y="468" text-anchor="middle">earliness (% of the request saved)</text>
+<text transform="translate(32,260.0) rotate(-90)" text-anchor="middle">wrong commits</text>
+<line x1="253.0" y1="425.0" x2="257.0" y2="415.0" stroke="#7c3aed" stroke-width="0.8"/>
+<text x="257.0" y="412.0" fill="#7c3aed">− closing-word rule (10.3%, 0)</text>
+<line x1="248.0" y1="425.0" x2="244.0" y2="415.0" stroke="#16a34a" stroke-width="0.8"/>
+<text x="116.0" y="412.0" fill="#16a34a">v3 (full) (10.0%, 0)</text>
+<line x1="202.6" y1="425.0" x2="206.6" y2="397.0" stroke="#ca8a04" stroke-width="0.8"/>
+<text x="206.6" y="394.0" fill="#ca8a04">− instant commits (7.3%, 0)</text>
+<line x1="130.4" y1="425.0" x2="134.4" y2="379.0" stroke="#0891b2" stroke-width="0.8"/>
+<text x="134.4" y="376.0" fill="#0891b2">Safe mode (3.0%, 0)</text>
+<line x1="80.0" y1="425.0" x2="84.0" y2="397.0" stroke="#6b7280" stroke-width="0.8"/>
+<text x="84.0" y="394.0" fill="#6b7280">Baseline (0.0%, 0)</text>
+<text x="280.5" y="359.0" fill="#ea580c">− neutral-word rule (11.4%, 5)</text>
+<text x="369.6" y="141.4" fill="#dc2626">Eager (16.7%, 21)</text>
+<circle cx="80.0" cy="430.0" r="5" fill="#6b7280" stroke="white" stroke-width="1.5"/>
+<circle cx="360.6" cy="144.4" r="5" fill="#dc2626" stroke="white" stroke-width="1.5"/>
+<circle cx="271.5" cy="362.0" r="5" fill="#ea580c" stroke="white" stroke-width="1.5"/>
+<circle cx="202.6" cy="430.0" r="5" fill="#ca8a04" stroke="white" stroke-width="1.5"/>
+<circle cx="253.0" cy="430.0" r="5" fill="#7c3aed" stroke="white" stroke-width="1.5"/>
+<circle cx="130.4" cy="430.0" r="5" fill="#0891b2" stroke="white" stroke-width="1.5"/>
+<circle cx="248.0" cy="430.0" r="5" fill="#16a34a" stroke="white" stroke-width="1.5"/>
+<text x="860.0" y="78" text-anchor="middle" font-size="14" font-weight="bold">holdout (250 requests)</text>
+<line x1="650.0" y1="90" x2="650.0" y2="430" stroke="#eee"/>
+<line x1="650" y1="430.0" x2="1070" y2="430.0" stroke="#eee"/>
+<text x="650.0" y="446" text-anchor="middle" fill="#444">0</text>
+<text x="644" y="434.0" text-anchor="end" fill="#444">0</text>
+<line x1="734.0" y1="90" x2="734.0" y2="430" stroke="#eee"/>
+<line x1="650" y1="362.0" x2="1070" y2="362.0" stroke="#eee"/>
+<text x="734.0" y="446" text-anchor="middle" fill="#444">5</text>
+<text x="644" y="366.0" text-anchor="end" fill="#444">10</text>
+<line x1="818.0" y1="90" x2="818.0" y2="430" stroke="#eee"/>
+<line x1="650" y1="294.0" x2="1070" y2="294.0" stroke="#eee"/>
+<text x="818.0" y="446" text-anchor="middle" fill="#444">10</text>
+<text x="644" y="298.0" text-anchor="end" fill="#444">20</text>
+<line x1="902.0" y1="90" x2="902.0" y2="430" stroke="#eee"/>
+<line x1="650" y1="226.0" x2="1070" y2="226.0" stroke="#eee"/>
+<text x="902.0" y="446" text-anchor="middle" fill="#444">15</text>
+<text x="644" y="230.0" text-anchor="end" fill="#444">30</text>
+<line x1="986.0" y1="90" x2="986.0" y2="430" stroke="#eee"/>
+<line x1="650" y1="158.0" x2="1070" y2="158.0" stroke="#eee"/>
+<text x="986.0" y="446" text-anchor="middle" fill="#444">20</text>
+<text x="644" y="162.0" text-anchor="end" fill="#444">40</text>
+<line x1="1070.0" y1="90" x2="1070.0" y2="430" stroke="#eee"/>
+<line x1="650" y1="90.0" x2="1070" y2="90.0" stroke="#eee"/>
+<text x="1070.0" y="446" text-anchor="middle" fill="#444">25</text>
+<text x="644" y="94.0" text-anchor="end" fill="#444">50</text>
+<rect x="650" y="90" width="420" height="340" fill="none" stroke="#999"/>
+<text x="860.0" y="468" text-anchor="middle">earliness (% of the request saved)</text>
+<text transform="translate(602,260.0) rotate(-90)" text-anchor="middle">wrong commits</text>
+<line x1="650.0" y1="425.0" x2="654.0" y2="325.0" stroke="#6b7280" stroke-width="0.8"/>
+<text x="654.0" y="322.0" fill="#6b7280">Baseline (0.0%, 0)</text>
+<text x="675.8" y="393.0" fill="#0891b2">Safe mode (1.0%, 5)</text>
+<line x1="692.0" y1="357.0" x2="696.0" y2="239.0" stroke="#ca8a04" stroke-width="0.8"/>
+<text x="696.0" y="236.0" fill="#ca8a04">− instant commits (2.5%, 10)</text>
+<text x="763.2" y="338.6" fill="#16a34a">v3 (full) (6.2%, 13)</text>
+<line x1="765.9" y1="275.4" x2="769.9" y2="193.4" stroke="#7c3aed" stroke-width="0.8"/>
+<text x="769.9" y="190.4" fill="#7c3aed">− closing-word rule (6.9%, 22)</text>
+<text x="786.7" y="257.0" fill="#ea580c">− neutral-word rule (7.6%, 25)</text>
+<text x="850.5" y="209.4" fill="#dc2626">Eager (11.4%, 32)</text>
+<circle cx="650.0" cy="430.0" r="5" fill="#6b7280" stroke="white" stroke-width="1.5"/>
+<circle cx="841.5" cy="212.4" r="5" fill="#dc2626" stroke="white" stroke-width="1.5"/>
+<circle cx="777.7" cy="260.0" r="5" fill="#ea580c" stroke="white" stroke-width="1.5"/>
+<circle cx="692.0" cy="362.0" r="5" fill="#ca8a04" stroke="white" stroke-width="1.5"/>
+<circle cx="765.9" cy="280.4" r="5" fill="#7c3aed" stroke="white" stroke-width="1.5"/>
+<circle cx="666.8" cy="396.0" r="5" fill="#0891b2" stroke="white" stroke-width="1.5"/>
+<circle cx="754.2" cy="341.6" r="5" fill="#16a34a" stroke="white" stroke-width="1.5"/>
+</svg>
