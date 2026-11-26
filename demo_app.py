@@ -1,66 +1,122 @@
-"""Prescient: "Your product, before your full stop." Live demo of our shopping agent: type a request, watch it being read word by word.
+"""Prescient: "Your product, before your full stop." Live, judge-facing demo of our agent.
 
     python3 demo_app.py            # opens http://127.0.0.1:8000 in your browser
     python3 demo_app.py --port 8080 --no-browser
 
-Standard library only. Nothing to install. Press Ctrl+C in the terminal to stop it.
+Standard library only, works offline (no CDN, no build step). Ctrl+C in the terminal stops it.
 
-How it works
-------------
-This file does NOT contain any shopping logic of its own. When you press Play, the page
-sends your sentence to this small local server. The server creates the real `Agent` from
-agent.py (the same one evaluate.py scores), feeds it the words one at a time exactly like
-evaluate.py does, and records what the agent said after each word: its filters, its
-confidence, how many products still fit, how many searches it has used, and whether it
-committed. The page then replays those steps word by word, at the speed you choose.
+Four tabs
+---------
+  LIVE TYPE      type your own request; every time you press space, the finished word is
+                 sent to a real Agent on this server (one agent per typing session).
+                 Enter = the shopper has finished (the agent's finish() is called).
+  EXAMPLES       four example requests, played word by word (Play / Next word / speed).
+  STRATEGY DUEL  the same request through three agents side by side:
+                   Baseline  = evaluate.py's BaselineAgent (waits for the whole request)
+                   Eager     = agent.py with the "Eager (no safety gate)" settings from
+                               compare.py's ablation table (changed in memory, put back after)
+                   Prescient = agent.py exactly as it is
+                 Each one is scored with evaluate.score_one(), the organisers' own formula.
+  RESULTS        results/strategies.csv, results/speed_safety.svg and the headline numbers,
+                 all read from the files in results/ when the page loads.
 
-The screen shows three stages for every word ("Prediction is not permission to act"):
-  1 ANTICIPATE  the agent's filters and how many products still fit
-  2 STABILIZE   every safety check from agent.py's _confidence(): fetch list may be cut
-                short (v4 guard), correction word open, number still being spoken, phrase
-                still open, no neutral word yet / polite closing word. Each is read from
-                the agent's own state (agent.pool_cut, agent.state), not re-computed.
-  3 COMMIT      committed, holding an earlier commit, or why it is waiting
-A replaced value shows "Correction detected: old → new". A commit shows a receipt with
-the real filters, products left, word number, confidence, searches and checks passed.
+Nothing on screen is invented
+-----------------------------
+This file has no shopping logic of its own. Every word is fed to the real Agent from agent.py
+(the same one evaluate.py scores), through the organisers' counted evaluate.Tools, exactly
+as evaluate.py does it. After each word this server records what the agent did and what is
+in its own state: filters, confidence, products left, searches used, commit, the safety
+checks of _confidence() (read from agent.state and agent.pool_cut), and correction cues.
+The page only replays those records. The "products left" funnel shows only these per-word
+counts (no made-up in-between numbers).
 
-The catalogue is read here only to show the product's name and price on screen.
-The agent itself still looks products up only through tools.search (counted).
+The "fit in catalogue" count is computed HERE, for display, with the agent's own
+FilterState.matches() over catalogue.csv. The agent itself still looks products up only
+through tools.search (counted). Reading catalogue.csv for display is the same as before.
+
+Wrong commits in the duel: a commit is "wrong" if it is not the target. For the built-in
+duel examples the target comes from hand-written gold filters (like dev.jsonl), checked at
+start-up to match exactly one catalogue product. For a request you type yourself there is no
+gold answer, so the reference is Prescient's answer after the full sentence; the page says so.
 """
 import argparse
+import contextlib
+import copy
+import csv
 import json
+import threading
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import agent as A
+import compare                       # the Eager definition used in results/ablation.md
+import evaluate
 from agent import Agent, clean
-from search import load_catalogue, search
+from search import load_catalogue
 
-PRODUCTS = {p["product_id"]: p for p in load_catalogue()}   # display only
+HERE = Path(__file__).resolve().parent
+CATALOGUE = load_catalogue()                                  # display only
+PRODUCTS = {p["product_id"]: p for p in CATALOGUE}
+SLOTS = ("category", "colour", "size", "brand", "max_price")
+
+# agent.CONFIG and the hazard tables are module-wide; the duel changes them for one run.
+# One lock around every agent run keeps a duel from ever leaking into another request.
+LOCK = threading.Lock()
+
+# Eager = exactly the "Eager (no safety gate)" row of compare.py's ablation table.
+_EAGER = next(row for row in compare.ABLATION if row[1] == "Eager")
+EAGER_CONFIG, EAGER_HAZARDS = _EAGER[3], _EAGER[4]
 
 # Our own example sentences (not taken from dev.jsonl), one per kind of request.
 EXAMPLES = [
-    ("Plain", "I want black Pacevo running shoes size nine under four thousand for my morning runs"),
-    ("Correction", "show me maroon Tanaro kurta size M, sorry, XS max 1500 for a wedding"),
-    ("Hindi-English", "bhai Loomsy ke navy blue sneakers dikhao size 7 under 4500 jaldi"),
-    ("Late constraint", "I need olive Urbanyx slides under seven hundred, oh and size 6 for the beach trip"),
+    {"name": "Plain",
+     "text": "I want black Pacevo running shoes size nine under four thousand for my morning runs"},
+    {"name": "Correction",
+     "text": "show me maroon Tanaro kurta size M, sorry, XS max 1500 for a wedding"},
+    {"name": "Hindi-English",
+     "text": "bhai Loomsy ke navy blue sneakers dikhao size 7 under 4500 jaldi"},
+    {"name": "Late constraint",
+     "text": "I need olive Urbanyx slides under seven hundred, oh and size 6 for the beach trip"},
+]
+
+# Duel examples. "gold" = what the shopper finally wants, written by hand (like dev.jsonl).
+DUEL_EXAMPLES = [
+    {"name": "Correction: black → white",
+     "text": "show me Loomsy sneakers in black size 9, no wait, white for office wear",
+     "gold": {"brand": "Loomsy", "category": "sneakers", "colour": "white", "size": "9"}},
+    {"name": "Plain",
+     "text": EXAMPLES[0]["text"],
+     "gold": {"brand": "Pacevo", "category": "running shoes", "colour": "black", "size": "9",
+              "max_price": 4000}},
+    {"name": "Correction: M → XS",
+     "text": EXAMPLES[1]["text"],
+     "gold": {"brand": "Tanaro", "category": "kurtas", "colour": "maroon", "size": "XS",
+              "max_price": 1500}},
+    {"name": "Hindi-English",
+     "text": EXAMPLES[2]["text"],
+     "gold": {"brand": "Loomsy", "category": "sneakers", "colour": "navy", "size": "7",
+              "max_price": 4500}},
 ]
 
 
-class Tools:
-    """The same counted search that evaluate.py gives the agent."""
-
-    def __init__(self):
-        self.searches = 0
-
-    def search(self, query="", filters=None, k=10):
-        self.searches += 1
-        return search(query, filters, k)
-
-    def record_search(self, n=1):
-        self.searches += n
+def gold_target(gold):
+    """The one catalogue product that matches the gold filters (None if not exactly one)."""
+    hits = [p for p in CATALOGUE
+            if all((p["price"] <= v) if k == "max_price" else (str(p[k]) == str(v))
+                   for k, v in gold.items())]
+    return hits[0]["product_id"] if len(hits) == 1 else None
 
 
+for ex in DUEL_EXAMPLES:
+    ex["target"] = gold_target(ex["gold"])
+DUEL_TARGETS = {ex["text"]: ex["target"] for ex in DUEL_EXAMPLES if ex["target"]}
+
+
+# ------------------------------------------------------------------------------------------
+# Reading the agent's own state
+# ------------------------------------------------------------------------------------------
 def product_card(pid):
     p = PRODUCTS.get(pid)
     if not p:
@@ -94,28 +150,29 @@ def corrections(before, after):
 def safety_checks(agent, word):
     """The safety checks agent._confidence() makes, read from the agent's own state.
 
-    Each check: name (when passed), open (short name when NOT passed), ok, detail.
+    Each check: name (when passed), open (short name when NOT passed), ok, detail, kind.
     The order and the conditions are the same as in agent.py's _confidence().
     """
     st, cfg = agent.state, A.CONFIG
     tok = clean(word)
     pool_n = None if agent.pool is None else len(agent.pool)
     checks = [
-        {"name": "Fetch list complete (not cut short)", "open": "Fetch list may be cut short",
+        {"name": "Fetch list complete", "open": "Fetch list may be cut short", "kind": "risk",
          "ok": not agent.pool_cut,
          "detail": "" if not agent.pool_cut
          else f"a fetch returned the full {cfg['fetch_k']} products, so \"one left\" is no proof"
          + (f" (this list: {pool_n})" if pool_n is not None else "")},
-        {"name": "No correction word open", "open": "Correction word", "ok": not st.cue_open,
+        {"name": "No correction word open", "open": "Correction word open", "kind": "correction",
+         "ok": not st.cue_open,
          "detail": "" if not st.cue_open else "heard a correction word: waiting for the new value"},
         {"name": "No number still being spoken", "open": "Number still being spoken",
-         "ok": st.number is None,
+         "kind": "hold", "ok": st.number is None,
          "detail": "" if st.number is None else "a number may continue (\"forty… five hundred\")"},
-        {"name": "No bare number waiting for its meaning", "open": "Number still being spoken",
-         "ok": st.pending_bare is None,
+        {"name": "No bare number waiting", "open": "Bare number waiting for its meaning",
+         "kind": "hold", "ok": st.pending_bare is None,
          "detail": "" if st.pending_bare is None else f"\"{st.pending_bare}\" could still be a size"},
-        {"name": "No size or price phrase still open", "open": "Phrase still open",
-         "ok": st.size_modifier is None and not st.price_prefix_open,
+        {"name": "No size or price phrase open", "open": "Size or price phrase still open",
+         "kind": "hold", "ok": st.size_modifier is None and not st.price_prefix_open,
          "detail": "" if st.size_modifier is None and not st.price_prefix_open
          else "\"extra…\" or \"under…\" is waiting for its value"},
     ]
@@ -130,7 +187,7 @@ def safety_checks(agent, word):
         detail = f"\"{tok}\" is a polite closing word: corrections often follow it, so it does not count"
     else:
         detail = "no neutral word since the last value yet"
-    checks.append({"name": "Shopper has moved on (neutral word)",
+    checks.append({"name": "Shopper has moved on", "kind": "hold",
                    "open": "Polite closing word" if (not moved_on and tok in A.CLOSING_WORDS)
                    else "No neutral word yet",
                    "ok": moved_on, "detail": detail})
@@ -158,398 +215,1133 @@ def commit_reason(left, checks, conf):
     return None
 
 
-def run_request(text):
-    """Feed the sentence to a fresh Agent word by word and record every step."""
-    words = text.split()
-    tools = Tools()
-    agent = Agent(tools)
-    agent.start("demo")
-    steps = []
-    first_commit = None
-    current = None
-    for i, word in enumerate(words):
-        before = dict(agent.state.values)
-        out = agent.observe(word) or {}
-        cands = agent._candidates()          # read-only peek, for the "products left" counter
+class Recorder:
+    """One real Agent, fed one word at a time; records what it did after every word."""
+
+    def __init__(self):
+        self.tools = evaluate.Tools()          # the organisers' counted tools
+        self.agent = Agent(self.tools)
+        self.agent.start("demo")
+        self.steps = []
+        self.current = None                    # latest product committed (as evaluate.py tracks it)
+        self.setter = {}                       # slot -> word indexes that said its value
+        self.open_cues = []                    # correction-cue words not yet resolved
+        self.final = None
+
+    def observe(self, word):
+        ag = self.agent
+        st = ag.state
+        i = len(self.steps)
+        before = dict(st.values)
+        phrase = st.number                     # a number phrase that may close on this word
+        phrase_len = len(phrase.tokens) if phrase is not None else 0
+        cue_before = st.cue_open
+
+        out = ag.observe(word) or {}
+
+        st = ag.state
+        tok = clean(word)
+        changed = [s for s in SLOTS if st.values[s] != before[s]]
+        fixes = corrections(before, st.values)
+
+        # Which words said each new value: a number phrase may span several words.
+        span = [i]
+        if phrase is not None and st.number is None and changed:
+            end = i if len(phrase.tokens) > phrase_len else i - 1
+            span = list(range(max(0, end - len(phrase.tokens) + 1), end + 1))
+        struck = sorted({j for f in fixes for j in self.setter.get(f["slot"], [])})
+        for s in changed:
+            self.setter[s] = span
+
+        # Correction cues, read from the agent: "no", "sorry", "I mean", "galti se"...
+        cue = bool(st.cue_open) and (tok in A.CORRECTION_CUES or st._is_soft_cue(tok))
+        uncue = []
+        if cue:
+            self.open_cues.append(i)
+        elif cue_before and not st.cue_open:
+            if not changed:                    # "make sure", "no more than": not a correction
+                uncue = self.open_cues
+            self.open_cues = []
+
+        cands = ag._candidates()               # read-only peek, for the "products left" counter
         left = None if cands is None else len(cands)
-        checks, hazard = safety_checks(agent, word)
+        fit = sum(1 for p in CATALOGUE if st.matches(p))   # display only (see top of file)
+        checks, hazard = safety_checks(ag, word)
         conf = out.get("confidence") or 0.0
+        commit = out.get("commit")
         step = {
-            "word": word,
-            "filters": out.get("filters"),
-            "values": {s: show_value(s, v) for s, v in agent.state.values.items()},
+            "i": i, "word": word,
+            "values": {s: show_value(s, v) for s, v in st.values.items()},
             "confidence": out.get("confidence"),
-            "left": left,
-            "searches": tools.searches,
-            "commit": out.get("commit"),
-            "new_commit": bool(out.get("commit")) and out.get("commit") != current,
-            "corrections": corrections(before, agent.state.values),
-            "checks": checks,
-            "hazard": hazard,
-            "waiting": None if out.get("commit") else commit_reason(left, checks, conf),
-            "holding": None if out.get("commit") else current,   # an earlier commit still stands
+            "left": left, "fit": fit,
+            "pool": None if ag.pool is None else len(ag.pool),
+            "pool_key": None if ag.pool_key is None else list(ag.pool_key),
+            "pool_cut": ag.pool_cut,
+            "searches": self.tools.searches,
+            "commit": commit,
+            "new_commit": bool(commit) and commit != self.current,
+            "changed": changed, "span": span if changed else [],
+            "corrections": fixes, "struck": struck,
+            "cue": cue, "uncue": uncue,
+            "checks": checks, "hazard": hazard,
+            "waiting": None if commit else commit_reason(left, checks, conf),
+            "holding": None if commit else self.current,
         }
-        if step["commit"]:
-            step["product"] = product_card(step["commit"])
-            current = step["commit"]
-            if first_commit is None:
-                first_commit = i
-        steps.append(step)
-    final = agent.finish()
-    if final is None:
-        final = agent.committed
-    early = None
-    if first_commit is not None and words:
-        to_come = len(words) - first_commit - 1
-        early = {"word_index": first_commit, "words_to_come": to_come,
-                 "percent": round(100 * to_come / len(words), 1)}
-    return {"words": words, "steps": steps, "final": final,
-            "final_product": product_card(final), "searches": tools.searches,
-            "early": early, "threshold": A.CONFIG["commit_threshold"]}
+        if commit:
+            step["product"] = product_card(commit)
+            if commit != self.current:
+                step["replaced"] = self.current
+            self.current = commit
+        self.steps.append(step)
+        return step
+
+    def finish(self):
+        final = self.agent.finish() or self.current        # the same rule as evaluate.py
+        n = len(self.steps)
+        commits = [(s["i"] + 1, s["commit"]) for s in self.steps if s["new_commit"]]
+        first = next((t for t, c in commits if c == final), None)
+        self.final = {
+            "final": final, "final_product": product_card(final),
+            "searches": self.tools.searches, "words": n, "commits": commits,
+            "first_commit_word": first,
+            "words_before_end": (n - first) if first else 0,
+            "values": {s: show_value(s, v) for s, v in self.agent.state.values.items()},
+        }
+        return self.final
 
 
+def run_request(text):
+    words = text.split()
+    with LOCK:
+        rec = Recorder()
+        for w in words:
+            rec.observe(w)
+        final = rec.finish()
+    return {"words": words, "steps": rec.steps, "final": final}
+
+
+# ------------------------------------------------------------------------------------------
+# Live typing: one Recorder per typing session
+# ------------------------------------------------------------------------------------------
+SESSIONS = {}
+MAX_SESSIONS = 30
+
+
+def live(action, sid=None, word=None):
+    with LOCK:
+        if action == "start":
+            while len(SESSIONS) >= MAX_SESSIONS:
+                SESSIONS.pop(next(iter(SESSIONS)))
+            sid = uuid.uuid4().hex
+            SESSIONS[sid] = Recorder()
+            return {"session": sid}
+        rec = SESSIONS.get(sid)
+        if rec is None:
+            return {"error": "session expired: retype the request"}
+        if action == "word":
+            if rec.final is not None:
+                return {"error": "request already finished"}
+            return {"step": rec.observe(str(word)[:60])}
+        if action == "finish":
+            return {"final": rec.final or rec.finish()}
+    return {"error": f"unknown action {action!r}"}
+
+
+# ------------------------------------------------------------------------------------------
+# Strategy duel
+# ------------------------------------------------------------------------------------------
+@contextlib.contextmanager
+def settings(config_changes, hazard_changes):
+    """Change agent.CONFIG / hazard tables for one run; always put them back (as compare.py)."""
+    saved_config = copy.deepcopy(A.CONFIG)
+    saved_hazards = {n: copy.deepcopy(getattr(A, n)) for n in compare.HAZARD_NAMES}
+    try:
+        A.CONFIG.update(config_changes or {})
+        for name, value in (hazard_changes or {}).items():
+            setattr(A, name, value)
+        yield
+    finally:
+        A.CONFIG.clear()
+        A.CONFIG.update(saved_config)
+        for name, value in saved_hazards.items():
+            setattr(A, name, value)
+
+
+STRATEGIES = [
+    ("baseline", "Baseline", "Waits for the whole request, then searches once.",
+     evaluate.BaselineAgent, None, None),
+    ("eager", "Eager", "Commits the moment exactly one product is left. No safety gate.",
+     Agent, EAGER_CONFIG, EAGER_HAZARDS),
+    ("prescient", "Prescient", "Commits only when one product is left AND the request has settled.",
+     Agent, None, None),
+]
+
+
+def run_lane(agent_cls, config_changes, hazard_changes, words):
+    with settings(config_changes, hazard_changes):
+        tools = evaluate.Tools()
+        ag = agent_cls(tools)
+        ag.start("duel")
+        steps, commits, current, reported = [], [], None, None
+        for t, w in enumerate(words, 1):
+            out = ag.observe(w)
+            if isinstance(out, str):
+                out = {"commit": out}
+            out = out or {}
+            new = bool(out.get("commit")) and out["commit"] != current
+            if new:
+                current = out["commit"]
+                commits.append((t, current))
+            if out.get("filters") is not None:
+                reported = out["filters"]
+            cands = ag._candidates() if hasattr(ag, "_candidates") else None
+            steps.append({"commit": out.get("commit"), "current": current, "new": new,
+                          "product": product_card(current) if new else None,
+                          "confidence": out.get("confidence"),
+                          "left": None if cands is None else len(cands)})
+        final = ag.finish() or current
+        return steps, commits, final, tools.searches, reported
+
+
+def duel(text):
+    words = text.split()
+    target = DUEL_TARGETS.get(text.strip())
+    reference = "gold" if target else "prescient"
+    lanes, raw = [], {}
+    with LOCK:
+        for key, name, rule, cls, cfg, hz in STRATEGIES:
+            raw[key] = run_lane(cls, cfg, hz, words)
+        if target is None:
+            target = raw["prescient"][2]       # typed request: no gold answer
+    for key, name, rule, cls, cfg, hz in STRATEGIES:
+        steps, commits, final, searches, reported = raw[key]
+        req = {"id": "duel", "words": words, "target": target}
+        sc = evaluate.score_one(req, commits, final, searches, reported)
+        for s in steps:
+            s["wrong"] = bool(s["new"]) and s["current"] != target
+        lanes.append({"key": key, "name": name, "rule": rule, "steps": steps,
+                      "commits": commits, "final": final, "final_product": product_card(final),
+                      "correct": sc["correct"], "wrong_commits": sc["wrong_commits"],
+                      "early_words": sc["early_words"], "early_share": sc["early_share"],
+                      "searches": searches, "score": sc["score"]})
+    return {"words": words, "target": target, "target_product": product_card(target),
+            "reference": reference, "lanes": lanes}
+
+
+# ------------------------------------------------------------------------------------------
+# Results tab: read straight from results/
+# ------------------------------------------------------------------------------------------
+def read_csv(path):
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    except OSError:
+        return []
+
+
+def results():
+    strategies = read_csv(HERE / "results" / "strategies.csv")
+    ablation = read_csv(HERE / "results" / "ablation.csv")
+
+    def pick(rows, dataset, starts):
+        return next((r for r in rows if r.get("dataset", dataset) == dataset
+                     and r["strategy"].startswith(starts)), None)
+
+    return {"strategies": strategies,
+            "dev": {"prescient": pick(strategies, "dev", "6 prescient"),
+                    "baseline": pick(strategies, "dev", "1 baseline")},
+            "holdout": {"prescient": pick(ablation, "holdout", "Prescient v3 (full)"),
+                        "baseline": pick(ablation, "holdout", "Baseline"),
+                        "eager": pick(ablation, "holdout", "Eager")},
+            "dev_eager": pick(ablation, "dev", "Eager"),
+            "has_svg": (HERE / "results" / "speed_safety.svg").exists()}
+
+
+def boot():
+    return {"examples": EXAMPLES,
+            "duel_examples": [{"name": e["name"], "text": e["text"], "target": e["target"],
+                               "gold": e["gold"]} for e in DUEL_EXAMPLES],
+            "threshold": A.CONFIG["commit_threshold"], "catalogue": len(CATALOGUE),
+            "fetch_k": A.CONFIG["fetch_k"], "quiet_words": A.CONFIG["quiet_words"],
+            "eager_config": {k: list(v) if isinstance(v, tuple) else v
+                             for k, v in EAGER_CONFIG.items()}}
+
+
+# ------------------------------------------------------------------------------------------
+# HTTP
+# ------------------------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype):
-        data = body.encode("utf-8")
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
+
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            page = PAGE.replace("__EXAMPLES__", json.dumps(EXAMPLES))
+        path = self.path.split("?")[0]
+        if path in ("/", "/index.html"):
+            page = PAGE.replace("__BOOT__", json.dumps(boot(), ensure_ascii=False))
             self._send(200, page, "text/html; charset=utf-8")
+        elif path == "/api/results":
+            self._json(results())
+        elif path == "/results/speed_safety.svg":          # the only file served from disk
+            try:
+                self._send(200, (HERE / "results" / "speed_safety.svg").read_bytes(), "image/svg+xml")
+            except OSError:
+                self._send(404, "not found", "text/plain")
         else:
             self._send(404, "not found", "text/plain")
 
     def do_POST(self):
-        if self.path != "/api/run":
-            return self._send(404, "not found", "text/plain")
         try:
             length = int(self.headers.get("Content-Length", 0))
-            text = json.loads(self.rfile.read(length) or b"{}").get("text", "")
-            result = run_request(str(text)[:1000])
-            self._send(200, json.dumps(result), "application/json")
-        except Exception as exc:                       # show the error on the page
-            self._send(500, json.dumps({"error": f"{type(exc).__name__}: {exc}"}),
-                       "application/json")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            text = str(body.get("text", ""))[:1000]
+            if self.path == "/api/run":
+                return self._json(run_request(text))
+            if self.path == "/api/duel":
+                return self._json(duel(text))
+            if self.path == "/api/live":
+                return self._json(live(body.get("action"), body.get("session"), body.get("word")))
+            self._send(404, "not found", "text/plain")
+        except Exception as exc:                            # show the error on the page
+            self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
-    def log_message(self, *args):                      # keep the terminal quiet
+    def log_message(self, *args):                           # keep the terminal quiet
         pass
 
 
 PAGE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prescient: your product, before your full stop</title>
+<title>Prescient — Your product, before your full stop.</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d232b; --muted:#6b7480; --line:#e2e6eb;
-          --accent:#2457d6; --ok:#17864a; --warn:#b86e00; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-         background:var(--bg); color:var(--ink); }
-  main { max-width:980px; margin:0 auto; padding:28px 20px 60px; }
-  h1 { font-size:32px; margin:0; letter-spacing:-.01em; }
-  .tagline { font-size:18px; font-style:italic; color:var(--accent); margin:2px 0 10px; }
-  .sub { color:var(--muted); margin:0 0 20px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
-          padding:16px 18px; margin-bottom:16px; }
-  textarea { width:100%; font:inherit; font-size:18px; padding:10px 12px; border-radius:8px;
-             border:1px solid var(--line); resize:vertical; min-height:56px; }
-  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:10px; }
-  button { font:inherit; padding:8px 16px; border-radius:8px; border:1px solid var(--line);
-           background:#fff; cursor:pointer; }
-  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
-  button.ex { font-size:14px; padding:5px 10px; color:var(--muted); }
-  label { color:var(--muted); font-size:14px; }
-  .words { font-size:22px; line-height:1.9; min-height:44px; }
-  .w { padding:2px 4px; border-radius:5px; color:#c3c9d1; transition:all .15s; }
-  .w.seen { color:var(--ink); }
-  .w.now { background:#dfe8ff; }
-  .w.commit { background:var(--ok); color:#fff; }
-  .grid { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
-  .slot { border:1px solid var(--line); border-radius:10px; padding:10px; min-height:70px; }
-  .slot .k { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
-  .slot .v { font-size:18px; font-weight:600; margin-top:4px; word-break:break-word; }
-  .slot.empty .v { color:#c3c9d1; font-weight:400; }
-  .slot.flash { animation:flash .8s; }
-  .slot.changed { border-color:var(--warn); }
-  .slot.changed .k::after { content:" · corrected"; color:var(--warn); text-transform:none; }
-  @keyframes flash { from { background:#fff4c2; } to { background:#fff; } }
-  .stats { display:grid; grid-template-columns:2fr 1fr 1fr; gap:10px; margin-top:12px; }
-  .bar { height:14px; background:#edf0f3; border-radius:7px; overflow:hidden; margin-top:6px; }
-  .bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
-  .bar.hot > div { background:var(--ok); }
-  .big { font-size:22px; font-weight:600; }
-  .muted { color:var(--muted); font-size:14px; }
-  .commit-box { border:2px solid var(--ok); background:#eefaf2; }
-  .commit-box h2 { margin:0 0 4px; font-size:18px; color:var(--ok); }
-  .hidden { display:none; }
-  table { border-collapse:collapse; width:100%; font-size:14px; }
-  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:500; }
-  tr.c td { background:#eefaf2; font-weight:600; }
-  .err { color:#b3261e; }
-  .principle { font-weight:600; margin:0 0 6px; }
-  .stages { display:grid; grid-template-columns:1.6fr 1fr 1fr; gap:12px; margin-bottom:16px; }
-  .stage { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px;
-           border-top:5px solid var(--line); }
-  .stage h3 { margin:0 0 8px; font-size:13px; letter-spacing:.08em; color:var(--muted); }
-  .stage.on-a { border-top-color:var(--accent); }
-  .stage.on-s { border-top-color:var(--warn); }
-  .stage.on-c { border-top-color:var(--ok); }
-  .stage .grid { grid-template-columns:repeat(3,1fr); gap:8px; }
-  .stage .slot { min-height:58px; padding:8px; }
-  .stage .slot .v { font-size:15px; }
-  ul.checks { list-style:none; padding:0; margin:0; font-size:14px; }
-  ul.checks li { padding:3px 0; }
-  ul.checks li.open { color:var(--warn); font-weight:600; }
-  ul.checks li.ok { color:var(--muted); }
-  ul.checks .d { display:block; font-weight:400; color:var(--muted); font-size:12px; margin-left:20px; }
-  .corr { background:#fff4e0; border:1px solid #f0c27a; color:#7a4a00; border-radius:10px; padding:10px 14px;
-          margin-bottom:16px; font-weight:600; }
-  .receipt table td:first-child { color:var(--muted); width:38%; }
-  .receipt td.pass { color:var(--ok); }
-  @media (max-width:800px) { .stages { grid-template-columns:1fr; } }
-  @media (max-width:700px) { .grid, .stage .grid { grid-template-columns:repeat(2,1fr); } }
+:root{
+  --bg:#06080b; --s1:#0c1015; --s2:#11161d; --line:#1b222b; --line2:#26303b;
+  --ink:#f3f6f9; --ink2:#c4ccd5; --muted:#7f8b98; --dim:#46505c; --faint:#2a323c;
+  --go:#3ee08f; --go-bg:rgba(62,224,143,.10); --go-glow:rgba(62,224,143,.45);
+  --amb:#ffb547; --amb-bg:rgba(255,181,71,.10);
+  --red:#ff5d5d; --red-bg:rgba(255,93,93,.12);
+  --t:200ms cubic-bezier(.2,.7,.2,1);
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter","Segoe UI",system-ui,Roboto,sans-serif;
+  --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:20px/1.4 var(--sans);
+  -webkit-font-smoothing:antialiased}
+button,input{font:inherit;color:inherit}
+.wrap{max-width:1780px;margin:0 auto;padding:18px 44px 28px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* header */
+header{display:flex;align-items:center;justify-content:space-between;gap:30px;
+  padding-bottom:14px;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:26px}
+.brand h1{margin:0;font-size:46px;font-weight:700;letter-spacing:-.025em;line-height:1}
+.brand h1 i{font-style:normal;color:var(--go)}
+.brand .tag{font-size:22px;color:var(--ink2);margin-top:0;letter-spacing:-.005em}
+.brand .motto{font-size:13px;color:var(--muted);margin-top:3px;letter-spacing:.14em;text-transform:uppercase}
+nav{display:flex;gap:6px;background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:5px}
+nav button{background:none;border:0;padding:11px 20px;border-radius:10px;font-size:16px;
+  font-weight:600;letter-spacing:.08em;color:var(--muted);cursor:pointer;transition:all var(--t)}
+nav button:hover{color:var(--ink)}
+nav button.on{background:var(--ink);color:#000}
+nav kbd{font:12px var(--mono);opacity:.5;margin-left:6px}
+
+/* controls */
+.bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 0 0;min-height:52px}
+.btn{background:var(--s2);border:1px solid var(--line2);border-radius:11px;padding:11px 20px;
+  font-size:17px;font-weight:600;cursor:pointer;transition:all var(--t)}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--ink);color:#000;border-color:var(--ink)}
+.btn.ex{font-weight:500;color:var(--ink2)}
+.btn.ex.on{border-color:var(--ink);color:var(--ink);background:var(--s1)}
+.sep{width:1px;height:32px;background:var(--line2);margin:0 6px}
+.speed{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:15px}
+input[type=range]{accent-color:var(--ink);width:150px}
+.live-in{flex:1;min-width:520px;background:var(--s1);border:1px solid var(--line2);border-radius:14px;
+  padding:16px 20px;font-size:26px;outline:none;transition:border-color var(--t)}
+.live-in:focus{border-color:var(--ink2)}
+.hint{color:var(--muted);font-size:15px}
+.hint b{color:var(--ink2);font-weight:600}
+
+/* request stream */
+.stream{min-height:84px;display:flex;flex-wrap:wrap;gap:8px 8px;align-items:center;
+  padding:18px 0 2px}
+.w{position:relative;font-size:32px;font-weight:600;letter-spacing:-.01em;padding:4px 12px;
+  border-radius:12px;color:var(--faint);border:1.5px solid transparent;
+  transition:color var(--t),background var(--t),border-color var(--t),box-shadow var(--t),opacity var(--t)}
+.w.heard{color:var(--ink)}
+.w.now{border-color:var(--line2);background:var(--s2)}
+.w.cue{color:var(--amb);background:var(--amb-bg);border-color:rgba(255,181,71,.35)}
+.w.fix{color:var(--amb)}
+.w.struck{color:var(--dim);text-decoration:line-through;text-decoration-color:var(--amb);
+  text-decoration-thickness:3px}
+.w.commit{color:#04140b;background:var(--go);border-color:var(--go);
+  box-shadow:0 0 0 6px var(--go-bg),0 0 38px var(--go-glow)}
+.w.wrongc{color:#fff;background:var(--red);border-color:var(--red);box-shadow:0 0 30px rgba(255,93,93,.5)}
+.w.old-commit{box-shadow:none;background:transparent;color:var(--go);border-color:var(--go)}
+.w .flag{position:absolute;left:50%;top:-22px;transform:translateX(-50%);font:700 11px var(--sans);
+  letter-spacing:.14em;color:var(--go);white-space:nowrap}
+.empty-note{color:var(--dim);font-size:26px}
+
+/* correction banner */
+.banner-slot{height:60px;position:relative;overflow:hidden;margin-bottom:4px}
+.banner{position:absolute;inset:6px 0;display:flex;align-items:center;gap:16px;padding:0 22px;
+  border-radius:14px;background:var(--amb-bg);border:1px solid rgba(255,181,71,.4);color:var(--amb);
+  font-size:22px;font-weight:600;transform:translateY(-120%);opacity:0;
+  transition:transform 220ms cubic-bezier(.2,.8,.2,1),opacity 220ms}
+.banner.show{transform:none;opacity:1}
+.banner .tag2{font-size:13px;letter-spacing:.16em;text-transform:uppercase;background:var(--amb);
+  color:#1d1200;padding:4px 9px;border-radius:7px}
+.banner s{color:var(--ink2);text-decoration-thickness:2px}
+.banner .arrow{color:var(--ink2)}
+.banner .sm{margin-left:auto;font-size:15px;font-weight:500;color:var(--muted)}
+
+/* pipeline */
+.pipe{display:grid;grid-template-columns:1.35fr 34px 1fr 34px .95fr;align-items:stretch}
+.stage{background:var(--s1);border:1.5px solid var(--line);border-radius:18px;padding:16px 20px;
+  min-height:214px;transition:border-color var(--t),background var(--t),box-shadow var(--t),opacity var(--t);opacity:.55}
+.stage.done{opacity:.85}
+.stage.on{opacity:1;border-color:var(--ink2);box-shadow:0 0 0 1px var(--ink2) inset}
+.stage.on.amb{border-color:var(--amb);box-shadow:0 0 0 1px var(--amb) inset,0 0 40px rgba(255,181,71,.12)}
+.stage.on.risk{border-color:var(--red);box-shadow:0 0 0 1px var(--red) inset}
+.stage.on.go{border-color:var(--go);background:linear-gradient(180deg,rgba(62,224,143,.10),var(--s1) 70%);
+  box-shadow:0 0 0 1px var(--go) inset,0 0 50px rgba(62,224,143,.18)}
+.stage h3{margin:0;display:flex;align-items:baseline;gap:12px;font-size:16px;letter-spacing:.2em;
+  font-weight:700;color:var(--ink2)}
+.stage h3 .n{font:600 14px var(--mono);color:var(--muted);letter-spacing:0}
+.stage .sub{font-size:15px;color:var(--muted);margin:3px 0 12px}
+.link{display:flex;align-items:center;justify-content:center}
+.link span{display:block;width:100%;height:2px;background:var(--line2);position:relative;transition:background var(--t)}
+.link span::after{content:"";position:absolute;right:-1px;top:-5px;border:6px solid transparent;
+  border-left:8px solid var(--line2);border-right:0;transition:border-color var(--t)}
+.link.lit span{background:var(--ink2)} .link.lit span::after{border-left-color:var(--ink2)}
+.link.go span{background:var(--go)} .link.go span::after{border-left-color:var(--go)}
+
+.chips{display:grid;grid-template-columns:1.25fr 1fr .8fr 1fr 1fr;gap:8px}
+.chip{background:var(--s2);border:1.5px solid var(--line);border-radius:12px;padding:9px 10px;
+  min-height:72px;transition:border-color var(--t),background var(--t)}
+.chip .k{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.chip .v{font-size:19px;font-weight:650;margin-top:5px;line-height:1.15;overflow-wrap:normal;word-break:normal;hyphens:none;transition:color var(--t)}
+.chip .o{font-size:14px;color:var(--muted);text-decoration:line-through;text-decoration-color:var(--amb);margin-top:2px}
+.chip.empty .v{color:var(--dim);font-weight:400}
+.chip.set{border-color:var(--ink2);background:#151b23}
+.chip.fixed{border-color:var(--amb)} .chip.fixed .v{color:var(--amb)}
+.pool{margin-top:12px;font-size:15px;color:var(--muted)}
+.pool b{color:var(--ink2);font-weight:600}
+
+.hold{font-size:26px;font-weight:700;letter-spacing:-.01em;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hold.amb{color:var(--amb)} .hold.go{color:var(--go)} .hold.risk{color:var(--red)} .hold.idle{color:var(--dim)}
+.hold-d{font-size:15px;color:var(--muted);margin:5px 0 12px;min-height:21px}
+.checks{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:7px 14px;align-content:start}
+.checks li{font-size:14px;color:var(--muted);display:flex;gap:8px;align-items:center;transition:color var(--t)}
+.checks li i{width:9px;height:9px;border-radius:50%;background:var(--dim);flex:none;transition:background var(--t)}
+.checks li.ok i{background:var(--go)} .checks li.ok{color:var(--ink2)}
+.checks li.no i{background:var(--amb)} .checks li.no{color:var(--amb)}
+.checks li.no.risk i{background:var(--red)} .checks li.no.risk{color:var(--red)}
+
+.conf-row{display:flex;align-items:baseline;gap:12px}
+.conf{font:700 54px var(--mono);letter-spacing:-.04em;line-height:1;transition:color var(--t)}
+.conf.go{color:var(--go)}
+.conf-l{font-size:15px;color:var(--muted)}
+.meter{position:relative;height:12px;border-radius:6px;background:var(--s2);margin:26px 0 4px;overflow:visible}
+.meter>div{height:100%;width:0;border-radius:6px;background:var(--ink2);transition:width var(--t),background var(--t)}
+.meter.go>div{background:var(--go)}
+.meter .thr{position:absolute;top:-6px;bottom:-6px;width:2px;background:var(--ink);opacity:.7}
+.meter .thr b{position:absolute;top:-20px;left:50%;transform:translateX(-50%);font:600 12px var(--mono);color:var(--muted)}
+.cstat{font-size:22px;font-weight:700;margin-top:12px;min-height:30px;transition:color var(--t)}
+.cstat.go{color:var(--go)}
+.cwhy{font-size:15px;color:var(--muted);margin-top:4px;min-height:20px}
+
+/* funnel + chart */
+.row2{display:grid;grid-template-columns:1fr 1.9fr;gap:16px;margin-top:14px}
+.panel{background:var(--s1);border:1.5px solid var(--line);border-radius:18px;padding:14px 22px}
+.panel h4{margin:0 0 6px;font-size:14px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.funnel-n{display:flex;align-items:baseline;gap:16px}
+.funnel-n .big{font:700 66px var(--mono);letter-spacing:-.05em;line-height:1;transition:color var(--t)}
+.funnel-n .big.go{color:var(--go)}
+.funnel-n .lbl{font-size:20px;color:var(--ink2)}
+.fbar{height:10px;background:var(--s2);border-radius:5px;margin:10px 0 10px;overflow:hidden}
+.fbar>div{height:100%;width:100%;background:var(--ink2);border-radius:5px;transition:width 240ms cubic-bezier(.2,.7,.2,1),background var(--t)}
+.fbar.go>div{background:var(--go)}
+.trail{font:500 19px var(--mono);color:var(--dim);display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+.trail b{color:var(--ink2);font-weight:600} .trail b.last{color:var(--ink)} .trail b.last.go{color:var(--go)}
+.trail em{font-style:normal;color:var(--dim)}
+.fnote{font-size:14px;color:var(--muted);margin-top:10px}
+.legend{display:flex;gap:22px;font-size:14px;color:var(--muted);margin-bottom:4px}
+.legend i{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:7px;border-radius:2px}
+svg.chart{width:100%;height:150px;display:block}
+
+/* reveal */
+.reveal{margin-top:14px;border-radius:22px;border:1.5px solid var(--go);
+  background:radial-gradient(1200px 300px at 0% 0%,rgba(62,224,143,.13),transparent 60%),var(--s1);
+  padding:16px 26px;display:none;opacity:0;transform:translateY(10px);
+  transition:opacity 240ms,transform 240ms cubic-bezier(.2,.8,.2,1)}
+.reveal.show{display:block}
+.reveal.in{opacity:1;transform:none}
+.reveal.neutral{border-color:var(--ink2);background:var(--s1)}
+.reveal .kick{font-size:14px;letter-spacing:.2em;text-transform:uppercase;font-weight:700;color:var(--go)}
+.reveal.neutral .kick{color:var(--ink2)}
+.rv-top{display:grid;grid-template-columns:1.15fr 1fr;gap:30px;align-items:center}
+.reveal .found{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:2px 0 0;line-height:1.15}
+.reveal .found em{font-style:normal;color:var(--go)}
+.reveal.neutral .found em{color:var(--ink)}
+.prod{display:flex;align-items:center;justify-content:space-between;gap:24px;
+  padding-left:30px;border-left:1px solid var(--line)}
+.prod .t{font-size:26px;font-weight:650;line-height:1.2}
+.prod .m{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap}
+.pill{border:1px solid var(--line2);border-radius:999px;padding:3px 12px;font-size:16px;color:var(--ink2)}
+.prod .price{font:700 40px var(--mono);letter-spacing:-.03em;white-space:nowrap}
+.prod .pid{font:500 15px var(--mono);color:var(--muted);text-align:right}
+.receipt{display:grid;grid-template-columns:1fr 2.7fr .7fr .7fr;gap:12px;margin-top:12px}
+.receipt>div{background:var(--s2);border:1px solid var(--line);border-radius:14px;padding:10px 16px}
+.receipt .k{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+.receipt .v{font-size:15px;color:var(--ink2);line-height:1.5}
+.receipt .two{columns:2;column-gap:18px}
+.receipt .v b{color:var(--ink);font-weight:600}
+.receipt .ok{color:var(--go)}
+.receipt .nw{white-space:nowrap;margin-right:10px}
+.receipt .bigv{font:700 26px var(--mono);color:var(--ink);line-height:1.1}
+.receipt .bigv small{font:500 14px var(--sans);color:var(--muted);margin-left:8px}
+.fin{margin-top:4px;font-size:16px;color:var(--ink2);min-height:22px}
+.fin .ok{color:var(--go);font-weight:700} .fin .bad{color:var(--red);font-weight:700}
+
+/* duel */
+.duel-ref{font-size:16px;color:var(--muted);margin:6px 0 14px}
+.duel-ref b{color:var(--ink2);font-weight:600}
+.lanes{display:grid;gap:16px}
+.lane{display:grid;grid-template-columns:270px 1fr 300px;gap:24px;align-items:center;background:var(--s1);
+  border:1.5px solid var(--line);border-radius:18px;padding:20px 24px;transition:border-color var(--t),box-shadow var(--t),background var(--t)}
+.lane.go{border-color:var(--go)}
+.lane.flash{animation:flash 900ms ease-out}
+@keyframes flash{0%{background:rgba(255,93,93,.35);border-color:var(--red)}100%{background:var(--s1)}}
+.lane.bad{border-color:var(--red)}
+.lane h5{margin:0;font-size:26px;letter-spacing:-.01em}
+.lane .r{font-size:14px;color:var(--muted);margin-top:4px;line-height:1.35}
+.lane .ws{display:flex;flex-wrap:wrap;gap:6px}
+.lane .w{font-size:21px;padding:3px 9px;border-radius:9px}
+.lane .w.commit{box-shadow:0 0 0 4px var(--go-bg),0 0 22px var(--go-glow)}
+.status{text-align:right}
+.status .s1{font-size:22px;font-weight:700;transition:color var(--t)}
+.status .s2{font-size:14px;color:var(--muted);margin-top:4px;min-height:18px}
+.status .go{color:var(--go)} .status .bad{color:var(--red)} .status .idle{color:var(--dim)}
+.wrongtag{display:inline-block;background:var(--red);color:#fff;font-weight:800;border-radius:8px;
+  padding:3px 10px;font-size:17px;margin-top:6px}
+.score-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:16px}
+.sc{background:var(--s1);border:1.5px solid var(--line);border-radius:16px;padding:16px 20px;opacity:0;transform:translateY(6px);
+  transition:opacity 240ms,transform 240ms}
+.sc.in{opacity:1;transform:none}
+.sc .k{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.sc .bigv{font:700 44px var(--mono);letter-spacing:-.03em;margin:4px 0}
+.sc .d{font-size:15px;color:var(--ink2);line-height:1.55}
+.sc.win{border-color:var(--go)} .sc.win .bigv{color:var(--go)}
+.sc .bad{color:var(--red)} .sc .ok{color:var(--go)}
+.own{display:flex;gap:10px;margin-top:4px}
+.own input{flex:1;background:var(--s1);border:1px solid var(--line2);border-radius:11px;padding:10px 16px;font-size:17px;outline:none}
+
+/* results */
+.hero{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:18px;margin-top:22px}
+.hcard{background:var(--s1);border:1.5px solid var(--line);border-radius:20px;padding:24px 26px}
+.hcard.main{border-color:var(--go);background:radial-gradient(600px 200px at 0 0,rgba(62,224,143,.12),transparent 70%),var(--s1)}
+.hcard .k{font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-weight:700}
+.hcard .v{font:700 76px var(--mono);letter-spacing:-.05em;line-height:1.05;margin-top:8px}
+.hcard.main .v{color:var(--go)}
+.hcard .v small{display:block;font:600 22px var(--sans);color:var(--muted);letter-spacing:0;margin-top:2px}
+.hcard .d{font-size:16px;color:var(--ink2);margin-top:6px}
+.honest{margin-top:16px;font-size:17px;color:var(--ink2);background:var(--s1);border:1px solid var(--line);
+  border-left:4px solid var(--amb);border-radius:12px;padding:14px 20px}
+.honest b{color:var(--ink)}
+.rgrid{display:grid;grid-template-columns:1.05fr 1fr;gap:20px;margin-top:18px}
+table.st{width:100%;border-collapse:collapse;font-size:17px}
+table.st th{text-align:left;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+  font-weight:700;padding:8px 10px;border-bottom:1px solid var(--line2)}
+table.st td{padding:10px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.st td.n{font-family:var(--mono);text-align:right}
+table.st th.n{text-align:right}
+table.st tr.me td{color:var(--go);font-weight:700}
+table.st td.bad{color:var(--red)}
+.sbar{height:8px;border-radius:4px;background:var(--ink2);opacity:.6}
+tr.me .sbar{background:var(--go);opacity:1}
+.paper{background:#fff;border-radius:14px;padding:10px}
+.paper img{width:100%;display:block}
+.src{font-size:13px;color:var(--muted);margin-top:10px;font-family:var(--mono)}
+
+.view{display:none} .view.on{display:block}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
+.err{color:var(--red);font-size:18px}
 </style></head>
-<body><main>
-  <h1>Prescient</h1>
-  <p class="tagline">Your product, before your full stop.</p>
-  <p class="principle">Prediction is not permission to act.</p>
-  <p class="sub">Type what a shopper would say. The agent hears it one word at a time and shows the
-  product as soon as it is safe to, often before the sentence ends.</p>
+<body><div class="wrap">
 
-  <div class="card">
-    <textarea id="text" rows="2"></textarea>
-    <div class="row">
-      <button class="primary" id="play">&#9654; Play</button>
-      <button id="step">Next word</button>
-      <button id="all">Show all</button>
-      <label>Speed <input type="range" id="speed" min="150" max="1500" step="50" value="600">
-        <span id="speedv"></span></label>
-    </div>
-    <div class="row" id="examples"><span class="muted">Try:</span></div>
+<header>
+  <div class="brand">
+    <h1>Prescient<i>.</i></h1>
+    <div><div class="tag">Your product, before your full stop.</div>
+    <div class="motto">Prediction is not permission to act.</div></div>
+  </div>
+  <nav id="tabs">
+    <button data-v="live">LIVE TYPE<kbd>1</kbd></button>
+    <button data-v="examples" class="on">EXAMPLES<kbd>2</kbd></button>
+    <button data-v="duel">STRATEGY DUEL<kbd>3</kbd></button>
+    <button data-v="results">RESULTS<kbd>4</kbd></button>
+  </nav>
+</header>
+
+<!-- ===================== single-agent view (LIVE TYPE + EXAMPLES) ===================== -->
+<section class="view on" id="v-single">
+  <div class="bar" id="bar-examples">
+    <span id="ex-buttons" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+    <span class="sep"></span>
+    <button class="btn primary" id="play">&#9654;&nbsp; Play</button>
+    <button class="btn" id="next">Next word &rarr;</button>
+    <button class="btn" id="reset">Reset</button>
+    <label class="speed">Speed <input type="range" id="speed" min="150" max="1500" step="50" value="650"><span id="speedv" class="num"></span></label>
+  </div>
+  <div class="bar" id="bar-live" style="display:none">
+    <input class="live-in" id="live-in" placeholder="Type a request… e.g. white Loomsy sneakers size 9 for office" autocomplete="off" spellcheck="false">
+    <div class="hint"><b>Space</b> sends each finished word<br><b>Enter</b> = full stop &nbsp;·&nbsp; <b>Esc</b> clears</div>
   </div>
 
-  <div class="card">
-    <div class="muted">What the agent has heard so far</div>
-    <div class="words" id="words"></div>
-  </div>
+  <div class="stream" id="stream"></div>
+  <div class="banner-slot"><div class="banner" id="banner"></div></div>
 
-  <div class="corr hidden" id="corr"></div>
-
-  <div class="stages">
+  <div class="pipe">
     <div class="stage" id="st-a">
-      <h3>1 · ANTICIPATE</h3>
-      <div class="grid" id="slots"></div>
-      <div class="stats" style="grid-template-columns:1fr 1fr">
-        <div><div class="muted">Products that still fit</div><div class="big" id="left">&ndash;</div></div>
-        <div><div class="muted">Searches used</div><div class="big" id="searches">0</div></div>
-      </div>
+      <h3><span class="n">01</span>ANTICIPATE</h3>
+      <div class="sub">Filters predicted from every word — never tighter than what was said</div>
+      <div class="chips" id="chips"></div>
+      <div class="pool" id="pool">No search yet.</div>
     </div>
+    <div class="link" id="l1"><span></span></div>
     <div class="stage" id="st-s">
-      <h3>2 · STABILIZE</h3>
-      <div class="muted" id="s-summary" style="margin-bottom:6px">&ndash;</div>
+      <h3><span class="n">02</span>STABILIZE</h3>
+      <div class="sub">Has the request settled? Every check from the agent's own state</div>
+      <div class="hold idle" id="hold">Listening…</div>
+      <div class="hold-d" id="hold-d"></div>
       <ul class="checks" id="checks"></ul>
     </div>
+    <div class="link" id="l2"><span></span></div>
     <div class="stage" id="st-c">
-      <h3>3 · COMMIT</h3>
-      <div class="big" id="c-status">&ndash;</div>
-      <div class="muted" id="c-why" style="margin:4px 0 8px"></div>
-      <div class="muted" id="thr-label">Confidence</div>
-      <div class="bar" id="bar"><div></div></div><div id="confv" class="muted">&ndash;</div>
+      <h3><span class="n">03</span>COMMIT</h3>
+      <div class="sub">Exactly 1 product left and confidence &ge; <span id="thr-t"></span></div>
+      <div class="conf-row"><div class="conf" id="conf">0%</div><div class="conf-l">confidence</div></div>
+      <div class="meter" id="meter"><div></div><span class="thr" id="thr"><b></b></span></div>
+      <div class="cstat" id="cstat">Waiting</div>
+      <div class="cwhy" id="cwhy"></div>
     </div>
   </div>
 
-  <div class="card commit-box receipt hidden" id="commit">
-    <h2 id="commit-h"></h2>
-    <div class="big" id="commit-title"></div>
-    <div class="muted" id="commit-meta" style="margin-bottom:10px"></div>
-    <table id="receipt"></table>
+  <div class="row2">
+    <div class="panel">
+      <h4>Products that still fit</h4>
+      <div class="funnel-n"><div class="big num" id="fn">–</div><div class="lbl" id="fl">of <span class="num" id="fcat"></span> in the catalogue</div></div>
+      <div class="fbar" id="fbar"><div></div></div>
+      <div class="trail" id="trail"></div>
+      <div class="fnote" id="fnote"></div>
+    </div>
+    <div class="panel">
+      <h4>Per word</h4>
+      <div class="legend"><span><i style="background:var(--ink2)"></i>products left (log scale)</span>
+        <span><i style="background:var(--go)"></i>confidence</span>
+        <span><i style="background:var(--go);opacity:.4;height:1px;border-top:1px dashed var(--go)"></i>commit threshold</span>
+        <span><i style="background:var(--amb);width:9px;height:9px;border-radius:50%"></i>correction</span></div>
+      <svg class="chart" id="chart" viewBox="0 0 1100 150" preserveAspectRatio="none"></svg>
+    </div>
   </div>
 
-  <div class="card hidden" id="final"></div>
-
-  <div class="card">
-    <div class="muted" style="margin-bottom:6px">Step-by-step log</div>
-    <table><thead><tr><th>#</th><th>Word</th><th>Category</th><th>Colour</th><th>Size</th>
-      <th>Brand</th><th>Max price</th><th>Fit</th><th>Open checks</th><th>Conf.</th><th>Action</th></tr></thead>
-      <tbody id="log"></tbody></table>
+  <div class="reveal" id="reveal">
+    <div class="rv-top">
+      <div><div class="kick" id="rv-kick">Committed</div><div class="found" id="rv-found"></div><div class="fin" id="rv-fin"></div></div>
+      <div class="prod">
+        <div><div class="t" id="rv-title"></div><div class="m" id="rv-meta"></div></div>
+        <div><div class="price" id="rv-price"></div><div class="pid" id="rv-pid"></div></div>
+      </div>
+    </div>
+    <div class="receipt" id="rv-receipt"></div>
   </div>
-</main>
+</section>
+
+<!-- ===================== STRATEGY DUEL ===================== -->
+<section class="view" id="v-duel">
+  <div class="bar">
+    <span id="duel-buttons" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+    <span class="sep"></span>
+    <button class="btn primary" id="d-play">&#9654;&nbsp; Play</button>
+    <button class="btn" id="d-next">Next word &rarr;</button>
+    <button class="btn" id="d-reset">Reset</button>
+    <label class="speed">Speed <input type="range" id="d-speed" min="150" max="1500" step="50" value="650"><span id="d-speedv" class="num"></span></label>
+  </div>
+  <div class="own"><input id="d-own" placeholder="…or type your own request and press Enter to duel it" spellcheck="false"></div>
+  <div class="duel-ref" id="d-ref"></div>
+  <div class="lanes" id="lanes"></div>
+  <div class="score-row" id="scores"></div>
+</section>
+
+<!-- ===================== RESULTS ===================== -->
+<section class="view" id="v-results">
+  <div class="hero" id="hero"></div>
+  <div class="honest" id="honest"></div>
+  <div class="rgrid">
+    <div class="panel"><h4>Commit strategies on dev (300 requests)</h4>
+      <table class="st" id="st-table"></table>
+      <div class="src">source: results/strategies.csv · made by python3 compare.py --strategies</div></div>
+    <div class="panel"><h4>Speed vs safety</h4>
+      <div class="paper"><img id="svg" alt="Speed vs safety chart"></div>
+      <div class="src">source: results/speed_safety.svg · made by python3 compare.py</div></div>
+  </div>
+</section>
+
+</div>
 <script>
-const EXAMPLES = __EXAMPLES__;
-const SLOTS = [["category","Category"],["colour","Colour"],["size","Size"],
-               ["brand","Brand"],["max_price","Max price"]];
-const SLOT_NAME = Object.fromEntries(SLOTS);
+const B = __BOOT__;
 const $ = id => document.getElementById(id);
-let data = null, pos = 0, timer = null, prev = {};
-
-function mark(ok) { return ok ? `<span class="pass">✓ passed</span>` : `<span class="err">✗ not passed</span>`; }
-function rupees(n) { return "₹" + Number(n).toLocaleString("en-IN"); }
-function show(k, v) { return v == null ? "–" : (k === "max_price" ? rupees(v) : v); }
-
-function buildSlots() {
-  $("slots").innerHTML = SLOTS.map(([k, n]) =>
-    `<div class="slot empty" id="s-${k}"><div class="k">${n}</div><div class="v">not said</div></div>`).join("");
+const SLOTS = [["category","Category"],["colour","Colour"],["size","Size"],["brand","Brand"],["max_price","Max price"]];
+const SLOT_NAME = Object.fromEntries(SLOTS);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const rupees = n => "₹" + Number(n).toLocaleString("en-IN");
+const pct = c => Math.round((c || 0) * 100) + "%";
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+async function post(url, body) {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  return r.json();
 }
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+const later = (el, cls) => requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add(cls)));
 
-function reset() {
-  clearInterval(timer); timer = null; pos = 0; prev = {};
-  $("play").innerHTML = "&#9654; Play";
-  buildSlots();
-  $("words").innerHTML = data ? data.words.map((w, i) => `<span class="w" id="w${i}">${esc(w)}</span>`).join(" ") : "";
-  $("bar").firstElementChild.style.width = "0"; $("bar").classList.remove("hot");
-  $("confv").textContent = "–"; $("left").textContent = "–"; $("searches").textContent = "0";
-  $("commit").classList.add("hidden"); $("final").classList.add("hidden"); $("log").innerHTML = "";
-  $("corr").classList.add("hidden"); $("checks").innerHTML = ""; $("s-summary").textContent = "–";
-  $("c-status").textContent = "–"; $("c-why").textContent = "";
-  for (const id of ["st-a", "st-s", "st-c"]) $(id).className = "stage";
-  if (data) $("thr-label").textContent = `Confidence (commits at ${Math.round(data.threshold * 100)}% or more, with exactly 1 product left)`;
+/* ============================== single-agent view ============================== */
+const V = { words: [], steps: [], shown: 0, final: null, trail: [] };
+
+function buildChips() {
+  $("chips").innerHTML = SLOTS.map(([k, n]) =>
+    `<div class="chip empty" id="c-${k}"><div class="k">${n}</div><div class="v">—</div><div class="o"></div></div>`).join("");
+}
+function resetView(words) {
+  V.words = words.slice(); V.steps = []; V.shown = 0; V.final = null; V.trail = [];
+  $("stream").innerHTML = words.length ? words.map((w, i) => `<span class="w" id="w${i}">${esc(w)}</span>`).join("")
+                                       : `<span class="empty-note">Start typing — each word goes to the agent as you press space.</span>`;
+  buildChips();
+  $("banner").classList.remove("show");
+  for (const id of ["st-a","st-s","st-c"]) $(id).className = "stage";
+  $("l1").className = "link"; $("l2").className = "link";
+  $("pool").innerHTML = "No search yet.";
+  $("hold").className = "hold idle"; $("hold").textContent = "Listening…"; $("hold-d").textContent = "";
+  $("checks").innerHTML = "";
+  $("conf").textContent = "0%"; $("conf").className = "conf";
+  $("meter").className = "meter"; $("meter").firstElementChild.style.width = "0";
+  $("cstat").textContent = "Waiting"; $("cstat").className = "cstat"; $("cwhy").textContent = "";
+  $("fn").textContent = B.catalogue; $("fn").className = "big num";
+  $("fbar").className = "fbar"; $("fbar").firstElementChild.style.width = "100%";
+  $("trail").innerHTML = `<b class="last">${B.catalogue}</b>`; $("fnote").textContent = "Nothing said yet: the whole catalogue fits.";
+  const rv = $("reveal"); rv.className = "reveal";
+  window.scrollTo({top: 0});
+  drawChart();
+}
+function addWord(w) {                       // live mode: a chip appears when the word is sent
+  if (!V.words.length) $("stream").innerHTML = "";
+  const i = V.words.length; V.words.push(w);
+  const s = document.createElement("span"); s.className = "w"; s.id = "w" + i; s.textContent = w;
+  $("stream").appendChild(s);
 }
 
-async function load() {
-  const text = $("text").value.trim();
-  if (!text) return false;
-  if (data && data.text === text) return true;
-  const r = await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"},
-                                      body: JSON.stringify({text})});
-  const j = await r.json();
-  if (j.error) { $("words").innerHTML = `<span class="err">${esc(j.error)}</span>`; data = null; return false; }
-  data = j; data.text = text; reset(); return true;
-}
-
-function stepOnce() {
-  if (!data || pos >= data.steps.length) { finish(); return false; }
-  const s = data.steps[pos], i = pos;
-  document.querySelectorAll(".w.now").forEach(e => e.classList.remove("now"));
-  const we = $("w" + i); we.classList.add("seen", "now");
-  const f = s.filters || {}, v = s.values || {};
-  // 1 ANTICIPATE: the agent's filter state. Sets ("running shoes / sneakers") stay sets.
-  for (const [k] of SLOTS) {
-    const el = $("s-" + k), val = v[k] != null ? v[k] : (f[k] != null ? show(k, f[k]) : null);
-    if (val !== prev[k]) {
-      el.querySelector(".v").textContent = val == null ? "not said" : val;
-      el.classList.toggle("empty", val == null);
-      el.classList.remove("flash"); void el.offsetWidth; if (val != null) el.classList.add("flash");
-    }
-    prev[k] = val;
-  }
-  for (const c of s.corrections) $("s-" + c.slot).classList.add("changed");
-  if (s.corrections.length) {
-    $("corr").innerHTML = s.corrections.map(c =>
-      `Correction detected: ${esc(SLOT_NAME[c.slot])} ${esc(c.old)} &rarr; ${esc(c.new)} <span class="muted">(word ${i + 1}, "${esc(s.word)}")</span>`).join("<br>");
-    $("corr").classList.remove("hidden");
-  }
-  $("left").textContent = s.left == null ? "not searched yet" : s.left;
-  $("searches").textContent = s.searches;
-  // 2 STABILIZE: every safety check the agent made on this word
-  const open = s.checks.filter(c => !c.ok);
-  $("s-summary").textContent = open.length
-    ? `Waiting: ${[...new Set(open.map(c => c.open))].join(", ")}`
-    : "All safety checks passed";
-  $("checks").innerHTML = s.checks.map(c =>
-    `<li class="${c.ok ? "ok" : "open"}">${c.ok ? "✓" : "⏸"} ${esc(c.ok ? c.name : c.open)}` +
-    (c.detail ? `<span class="d">${esc(c.detail)}</span>` : "") + `</li>`).join("");
-  // 3 COMMIT
-  const c = s.confidence || 0;
-  $("bar").firstElementChild.style.width = Math.round(c * 100) + "%";
-  $("bar").classList.toggle("hot", c >= data.threshold);
-  $("confv").textContent = Math.round(c * 100) + "%" +
-    (s.hazard != null ? ` · chance a correction is still coming: ${(100 * s.hazard).toFixed(1)}%` : "");
-  if (s.commit) {
-    $("c-status").textContent = s.new_commit ? `COMMITTED ${s.commit}` : `Still committed ${s.commit}`;
-    $("c-why").textContent = "1 product left, all checks passed, confidence high enough";
-  } else if (s.holding) {
-    $("c-status").textContent = `Holding ${s.holding}`;
-    $("c-why").textContent = `earlier commit still stands; not re-confirmed on this word: ${s.waiting}`;
-  } else {
-    $("c-status").textContent = "Waiting";
-    $("c-why").textContent = s.waiting || "";
-  }
-  $("st-a").className = "stage on-a";
-  $("st-s").className = "stage" + (open.length ? " on-s" : "");
-  $("st-c").className = "stage" + (s.commit ? " on-c" : "");
-  let action = "";
-  if (s.commit) {
-    we.classList.add("commit");
-    action = (s.new_commit ? "commit " : "still ") + s.commit;
-  }
+function applyStep(s) {
+  const i = s.i, n = V.words.length;
+  V.steps.push(s); V.shown = V.steps.length;
+  // 1. request stream
+  document.querySelectorAll("#stream .w.now").forEach(e => e.classList.remove("now"));
+  const we = $("w" + i); we.classList.add("heard", "now");
+  if (s.cue) we.classList.add("cue");
+  for (const j of s.uncue) $("w" + j)?.classList.remove("cue");
+  for (const j of s.struck) { const e = $("w" + j); e?.classList.add("struck"); e?.classList.remove("fix"); }
+  if (s.corrections.length) for (const j of s.span) $("w" + j)?.classList.add("fix");
   if (s.new_commit) {
-    const p = s.product || {}, toCome = data.words.length - i - 1;
-    $("commit").classList.remove("hidden");
-    $("commit-h").textContent = toCome > 0
-      ? `Receipt: committed after word ${i + 1} of ${data.words.length}, ${toCome} word${toCome > 1 ? "s" : ""} before the shopper finished`
-      : `Receipt: committed on the last word`;
-    $("commit-title").textContent = p.title || s.commit;
-    $("commit-meta").textContent = p.price ? `${s.commit} · ${p.brand} · ${p.category} · ${p.colour} · size ${p.size || "-"} · ${rupees(p.price)}` : s.commit;
-    const filt = SLOTS.map(([k, n]) => `${n}: ${v[k] != null ? v[k] : "–"}`).join(" · ");
-    const rows = [
-      ["Filters", esc(filt)],
-      ["Products left", s.left],
-      ["Word number", `${i + 1} of ${data.words.length} ("${esc(s.word)}")`],
-      ["Confidence", `${Math.round(c * 100)}% (needs ${Math.round(data.threshold * 100)}%)` +
-        (s.hazard != null ? ` · correction chance ${(100 * s.hazard).toFixed(1)}%` : "")],
-      ["Searches", s.searches],
-      ...s.checks.map(k => [esc(k.name), mark(k.ok) + (k.detail ? ` <span class="muted">(${esc(k.detail)})</span>` : "")]),
-      ["Exactly one product left", mark(s.left === 1)],
-      ["Confidence ≥ threshold", mark(c >= data.threshold)],
-    ];
-    $("receipt").innerHTML = rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join("");
+    document.querySelectorAll("#stream .w.commit").forEach(e => { e.classList.remove("commit"); e.classList.add("old-commit"); e.querySelector(".flag")?.remove(); });
+    we.classList.add("commit");
+    we.insertAdjacentHTML("beforeend", `<span class="flag">COMMIT</span>`);
   }
-  const tr = document.createElement("tr"); if (s.commit) tr.className = "c";
-  tr.innerHTML = `<td>${i + 1}</td><td>${esc(s.word)}</td>` +
-    SLOTS.map(([k]) => `<td>${esc(v[k] != null ? v[k] : show(k, f[k]))}</td>`).join("") +
-    `<td>${s.left == null ? "–" : s.left}</td><td>${esc([...new Set(open.map(k => k.open))].join(", "))}</td>` +
-    `<td>${Math.round(c * 100)}%</td><td>${esc(action)}</td>`;
-  $("log").appendChild(tr);
-  pos++;
-  if (pos >= data.steps.length) finish();
+  // 2. correction banner
+  if (s.corrections.length) {
+    const c = s.corrections[s.corrections.length - 1];
+    $("banner").classList.remove("show");
+    $("banner").innerHTML = `<span class="tag2">Correction detected</span>${esc(SLOT_NAME[c.slot])}: <s>${esc(cap(c.old))}</s> <span class="arrow">&rarr;</span> ${esc(cap(c.new))}` +
+      `<span class="sm">word ${i + 1} · "${esc(s.word)}" · the agent replaced the old value, never added to it</span>`;
+    later($("banner"), "show");
+  }
+  // 3. ANTICIPATE chips
+  for (const [k] of SLOTS) {
+    const el = $("c-" + k), val = s.values[k];
+    el.querySelector(".v").textContent = val == null ? "—" : cap(val);
+    el.classList.toggle("empty", val == null);
+    el.classList.toggle("set", val != null);
+  }
+  for (const c of s.corrections) { const el = $("c-" + c.slot); el.classList.add("fixed"); el.querySelector(".o").textContent = cap(c.old); }
+  const pk = s.pool_key;
+  $("pool").innerHTML = s.pool == null ? "No search yet: waiting for a category or brand."
+    : `<b>${plural(s.searches, "search")}</b> used · fetched <b>${s.pool}</b> ${esc(pk ? pk[1] : "")} products` +
+      (s.left != null ? ` · <b>${s.left}</b> fit` : "") +
+      (s.pool_cut ? ` · <span style="color:var(--red)">list may be cut short</span>` : "");
+  // 4. STABILIZE
+  const open = s.checks.filter(c => !c.ok);
+  const corrOpen = open.some(c => c.kind === "correction"), risk = open.some(c => c.kind === "risk");
+  $("checks").innerHTML = s.checks.map(c => `<li class="${c.ok ? "ok" : "no"} ${c.kind}"><i></i>${esc(c.ok ? c.name : c.open)}</li>`).join("");
+  let holdTxt, holdCls, holdD;
+  if (s.left == null) { holdTxt = "Not searched yet"; holdCls = "idle"; holdD = "needs a category or brand to search"; }
+  else if (open.length) { holdTxt = "Holding: " + open[0].open; holdCls = risk ? "risk" : (corrOpen ? "amb" : "amb"); holdD = open[0].detail; }
+  else { holdTxt = "All clear"; holdCls = "go"; holdD = s.hazard != null ? `chance a correction is still coming: ${(100 * s.hazard).toFixed(1)}% (measured on dev)` : ""; }
+  $("hold").textContent = holdTxt; $("hold").className = "hold " + holdCls; $("hold-d").textContent = holdD || "";
+  // 5. COMMIT
+  const c = s.confidence || 0, hot = c >= B.threshold;
+  $("conf").textContent = pct(c); $("conf").className = "conf" + (hot ? " go" : "");
+  $("meter").className = "meter" + (hot ? " go" : ""); $("meter").firstElementChild.style.width = pct(c);
+  if (s.commit) { $("cstat").textContent = "Committed " + s.commit + (s.new_commit ? "" : " · still holds"); $("cstat").className = "cstat go";
+                  $("cwhy").textContent = s.new_commit ? "1 product left · all checks passed · confidence ≥ " + pct(B.threshold) : "re-checked on this word: all checks still pass"; }
+  else if (s.holding) { $("cstat").textContent = "Holding commit " + s.holding; $("cstat").className = "cstat go";
+                  $("cwhy").textContent = "not re-confirmed on this word: " + (s.waiting || ""); }
+  else { $("cstat").textContent = "Waiting"; $("cstat").className = "cstat"; $("cwhy").textContent = s.waiting || ""; }
+  // stage lighting
+  const committed = !!(s.commit || s.holding);
+  $("st-a").className = "stage " + (committed || s.left === 1 ? "done" : "on");
+  $("st-s").className = "stage " + (committed ? "done" : (s.left === 1 ? "on " + (risk ? "risk" : (open.length ? "amb" : "")) : ""));
+  $("st-c").className = "stage " + (committed ? "on go" : "");
+  $("l1").className = "link" + (committed ? " go" : (s.left === 1 ? " lit" : ""));
+  $("l2").className = "link" + (committed ? " go" : "");
+  // 6. funnel
+  $("fn").textContent = s.fit; $("fn").className = "big num" + (s.fit === 1 && committed ? " go" : "");
+  const w = s.fit <= 0 ? 0 : Math.max(1.5, 100 * Math.log10(s.fit + 1) / Math.log10(B.catalogue + 1));
+  $("fbar").firstElementChild.style.width = w + "%"; $("fbar").className = "fbar" + (s.fit === 1 && committed ? " go" : "");
+  if (V.trail[V.trail.length - 1] !== s.fit) V.trail.push(s.fit);
+  if (!V.trail.length || V.trail[0] !== B.catalogue) V.trail.unshift(B.catalogue);
+  $("trail").innerHTML = V.trail.map((v, k) => `<b class="${k === V.trail.length - 1 ? "last" + (v === 1 && committed ? " go" : "") : ""}">${v}</b>`).join("<em>→</em>");
+  $("fnote").textContent = s.left == null ? "Counted over the catalogue with the agent's own filters (display only)."
+    : `The agent's own count, from its ${plural(s.searches, "search")}: ${s.left}.`;
+  drawChart();
+  // 7. reveal on commit
+  if (s.new_commit) showReveal(s, i);
+}
+const cap = v => v == null ? v : String(v).replace(/^\w/, ch => ch.toUpperCase());
+
+function showReveal(s, i) {
+  const n = V.words.length, p = s.product || {}, left = n - i - 1, rv = $("reveal");
+  rv.className = "reveal show";
+  $("rv-kick").textContent = s.replaced ? `Committed · replaced earlier commit ${s.replaced}` : "Committed";
+  const live = !!LIVE.sid && MODE === "live";
+  $("rv-found").innerHTML = live ? `Found at word <em>${i + 1}</em> — before you finished typing`
+    : (left > 0 ? `Found at word <em>${i + 1}</em> of ${n} — <em>${plural(left, "word")}</em> before the full stop`
+                : `Found at word <em>${i + 1}</em> of ${n} — on the last word`);
+  fillProduct(p, s.commit);
+  const checks = s.checks.map(c => `<span class="nw"><span class="ok">✓</span> ${esc(c.name)}</span>`).join(" ");
+  $("rv-receipt").innerHTML =
+    `<div><div class="k">Filters</div><div class="v">${SLOTS.filter(([k]) => s.values[k] != null).map(([k]) => `<b>${esc(cap(s.values[k]))}</b>`).join(" · ")}</div></div>` +
+    `<div><div class="k">Checks passed</div><div class="v"><span class="nw"><span class="ok">✓</span> Exactly 1 product left</span> ${checks}</div></div>` +
+    `<div><div class="k">Confidence</div><div class="bigv">${pct(s.confidence)}<small>needs ${pct(B.threshold)}</small></div></div>` +
+    `<div><div class="k">Searches used</div><div class="bigv">${s.searches}<small>counted</small></div></div>`;
+  $("rv-fin").innerHTML = "";
+  later(rv, "in");
+  revealIntoView();
+}
+function revealIntoView() {           // only if the screen is too small to show it; never while typing
+  if (MODE === "live") return;
+  setTimeout(() => { const r = $("reveal").getBoundingClientRect();
+    if (r.bottom > innerHeight) $("reveal").scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "end"}); }, 60);
+}
+function fillProduct(p, pid) {
+  $("rv-title").textContent = p.title || pid || "—";
+  $("rv-meta").innerHTML = p.brand ? [p.brand, cap(p.colour), p.size ? "Size " + p.size : null, cap(p.category)]
+    .filter(Boolean).map(x => `<span class="pill">${esc(x)}</span>`).join("") : "";
+  $("rv-price").textContent = p.price ? rupees(p.price) : "";
+  $("rv-pid").textContent = pid || "";
+}
+function showFinal(f) {
+  V.final = f;
+  document.querySelectorAll("#stream .w.now").forEach(e => e.classList.remove("now"));
+  const rv = $("reveal");
+  if (!f.first_commit_word) {          // never committed early: show the final answer, plainly
+    rv.className = "reveal show neutral";
+    $("rv-kick").textContent = "Answer at the full stop";
+    $("rv-found").innerHTML = f.final ? `Waited for the full stop — <em>never safe to commit earlier</em>` : `No product found`;
+    fillProduct(f.final_product || {}, f.final);
+    $("rv-receipt").innerHTML = `<div><div class="k">Filters at the end</div><div class="v">${SLOTS.filter(([k]) => f.values[k] != null).map(([k]) => `<b>${esc(cap(f.values[k]))}</b>`).join(" · ")}</div></div>` +
+      `<div><div class="k">Why no early commit</div><div class="v">${esc(V.steps.length ? (V.steps[V.steps.length - 1].waiting || "") : "")}</div></div>` +
+      `<div><div class="k">Words</div><div class="bigv">${f.words}</div></div><div><div class="k">Searches used</div><div class="bigv">${f.searches}<small>counted</small></div></div>`;
+    $("rv-fin").innerHTML = "";
+    later(rv, "in");
+    revealIntoView();
+    return;
+  }
+  const same = f.commits.length && f.commits[f.commits.length - 1][1] === f.final;
+  $("rv-fin").innerHTML = `Full stop · final answer <b>${esc(f.final)}</b> ` +
+    (same ? `<span class="ok">✓ the product it committed to</span>` : `<span class="bad">differs from its last commit</span>`) +
+    ` · ${plural(f.searches, "search")} in total`;
+}
+
+/* chart: products left (log) + confidence, per word — straight from the steps */
+function drawChart() {
+  const svg = $("chart"), W = 1100, H = 150, L = 52, R = 52, T = 8, Bm = 24;
+  const n = Math.max(V.words.length, MODE === "live" ? 12 : 2), st = V.steps;
+  const x = i => L + (n <= 1 ? 0 : i * (W - L - R) / (n - 1));
+  const lo = Math.log10(0.4), lmax = Math.log10(B.catalogue);      // "1 left" sits above the 0% line
+  const yP = v => T + (1 - (v <= 0 ? 0 : (Math.log10(v) - lo) / (lmax - lo))) * (H - T - Bm);
+  const yC = c => T + (1 - c) * (H - T - Bm);
+  let g = "";
+  for (const v of [1, 10, 100, 1000]) g += `<line x1="${L}" x2="${W - R}" y1="${yP(v)}" y2="${yP(v)}" stroke="#1b222b"/><text x="${L - 10}" y="${yP(v) + 5}" fill="#7f8b98" font-size="14" text-anchor="end" font-family="ui-monospace,Menlo">${v}</text>`;
+  for (const c of [0, .5, 1]) g += `<text x="${W - R + 10}" y="${yC(c) + 5}" fill="#3ee08f" font-size="14" font-family="ui-monospace,Menlo" opacity=".8">${Math.round(c * 100)}%</text>`;
+  g += `<line x1="${L}" x2="${W - R}" y1="${yC(B.threshold)}" y2="${yC(B.threshold)}" stroke="#3ee08f" stroke-dasharray="5 6" opacity=".45"/>`;
+  for (let i = 0; i < V.words.length; i++) g += `<text x="${x(i)}" y="${H - 8}" fill="${i < st.length ? "#7f8b98" : "#2a323c"}" font-size="13" text-anchor="middle" font-family="ui-monospace,Menlo">${i + 1}</text>`;
+  if (st.length) {
+    const pp = st.map(s => `${x(s.i)},${yP(s.fit)}`).join(" ");
+    const cp = st.map(s => `${x(s.i)},${yC(s.confidence || 0)}`).join(" ");
+    for (const s of st) if (s.corrections.length) g += `<circle cx="${x(s.i)}" cy="${H - Bm}" r="7" fill="#ffb547"/>`;
+    for (const s of st) if (s.new_commit) g += `<line x1="${x(s.i)}" x2="${x(s.i)}" y1="${T}" y2="${H - Bm}" stroke="#3ee08f" stroke-width="2" opacity=".55"/>`;
+    g += `<polyline points="${pp}" fill="none" stroke="#c4ccd5" stroke-width="3" stroke-linejoin="round"/>`;
+    g += `<polyline points="${cp}" fill="none" stroke="#3ee08f" stroke-width="3" stroke-linejoin="round"/>`;
+    for (const s of st) g += `<circle cx="${x(s.i)}" cy="${yP(s.fit)}" r="4" fill="#c4ccd5"/><circle cx="${x(s.i)}" cy="${yC(s.confidence || 0)}" r="${s.new_commit ? 7 : 4}" fill="#3ee08f"/>`;
+  }
+  svg.innerHTML = g;
+}
+
+/* ============================== EXAMPLES mode ============================== */
+const EX = { data: null, timer: null, idx: 0 };
+function exButtons() {
+  $("ex-buttons").innerHTML = B.examples.map((e, k) => `<button class="btn ex${k === EX.idx ? " on" : ""}" data-k="${k}">${esc(e.name)}</button>`).join("");
+  $("ex-buttons").querySelectorAll("button").forEach(b => b.onclick = () => { EX.idx = +b.dataset.k; exButtons(); loadExample(true); });
+}
+async function loadExample(autoplay) {
+  stopEx();
+  const text = B.examples[EX.idx].text;
+  const d = await post("/api/run", {text});
+  if (d.error) { $("stream").innerHTML = `<span class="err">${esc(d.error)}</span>`; return; }
+  EX.data = d; resetView(d.words);
+  if (autoplay) playEx();
+}
+function exNext() {
+  const d = EX.data; if (!d) return false;
+  if (V.shown >= d.steps.length) return false;
+  applyStep(d.steps[V.shown]);
+  if (V.shown >= d.steps.length) { showFinal(d.final); stopEx(); }
   return true;
 }
+function playEx() {
+  if (!EX.data) return;
+  if (V.shown >= EX.data.steps.length) resetView(EX.data.words);
+  $("play").innerHTML = "&#10073;&#10073;&nbsp; Pause";
+  exNext();
+  EX.timer = setInterval(() => { if (!exNext()) stopEx(); }, +$("speed").value);
+}
+function stopEx() { clearInterval(EX.timer); EX.timer = null; $("play").innerHTML = (EX.data && V.shown >= EX.data.steps.length) ? "&#8635;&nbsp; Replay" : "&#9654;&nbsp; Play"; }
+$("play").onclick = () => EX.timer ? stopEx() : playEx();
+$("next").onclick = () => { stopEx(); if (EX.data && V.shown >= EX.data.steps.length) resetView(EX.data.words); exNext(); };
+$("reset").onclick = () => { stopEx(); if (EX.data) resetView(EX.data.words); };
+function speedLabel(inp, out) { out.textContent = (+inp.value / 1000).toFixed(2) + " s/word"; }
+$("speed").oninput = () => { speedLabel($("speed"), $("speedv")); if (EX.timer) { clearInterval(EX.timer); EX.timer = setInterval(() => { if (!exNext()) stopEx(); }, +$("speed").value); } };
 
-function finish() {
-  clearInterval(timer); timer = null; $("play").innerHTML = "&#8635; Replay";
-  document.querySelectorAll(".w.now").forEach(e => e.classList.remove("now"));
-  const p = data.final_product, el = $("final");
-  el.classList.remove("hidden");
-  let html = `<div class="muted">Sentence finished. Final answer</div>`;
-  html += p ? `<div class="big">${esc(p.title)}</div><div class="muted">${p.product_id} · size ${p.size || "-"} · ${rupees(p.price)}</div>`
-            : `<div class="big">No product found</div>`;
-  html += `<div class="muted" style="margin-top:6px">${data.searches} search${data.searches === 1 ? "" : "es"} used. `;
-  html += data.early ? `First shown with ${data.early.words_to_come} of ${data.words.length} words still to come (${data.early.percent}% early).`
-                     : `The agent waited for the whole sentence (not sure enough earlier).`;
-  html += `</div>`;
-  el.innerHTML = html;
+/* ============================== LIVE TYPE mode ============================== */
+const LIVE = { sid: null, sent: [], queue: Promise.resolve(), finished: false };
+function liveSync(finish) {
+  LIVE.queue = LIVE.queue.then(async () => {
+    const text = $("live-in").value;
+    const toks = text.split(/\s+/).filter(Boolean);
+    const done = finish ? toks : (/\s$/.test(text) ? toks : toks.slice(0, -1));
+    const prefixOk = done.length >= LIVE.sent.length && LIVE.sent.every((w, k) => done[k] === w);
+    const more = done.length > LIVE.sent.length;
+    if (!LIVE.sid || !prefixOk || (LIVE.finished && more)) {   // edited earlier words: start a fresh agent
+      const r = await post("/api/live", {action: "start"});
+      LIVE.sid = r.session; LIVE.sent = []; LIVE.finished = false; resetView([]);
+    }
+    if (LIVE.finished) return;
+    for (let k = LIVE.sent.length; k < done.length; k++) {
+      addWord(done[k]);
+      const r = await post("/api/live", {action: "word", session: LIVE.sid, word: done[k]});
+      if (r.error) { $("hold-d").textContent = r.error; return; }
+      LIVE.sent.push(done[k]);
+      applyStep(r.step);
+    }
+    if (finish && LIVE.sent.length && !LIVE.finished) {
+      const r = await post("/api/live", {action: "finish", session: LIVE.sid});
+      LIVE.finished = true;
+      if (r.final) showFinal(r.final);
+    }
+  }).catch(e => { $("hold-d").textContent = String(e); });
+}
+$("live-in").addEventListener("input", () => liveSync(false));
+$("live-in").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); liveSync(true); }
+  if (e.key === "Escape") { $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]); }
+});
+
+/* ============================== STRATEGY DUEL ============================== */
+const D = { data: null, timer: null, idx: 0, shown: 0, custom: null };
+function duelButtons() {
+  $("duel-buttons").innerHTML = B.duel_examples.map((e, k) => `<button class="btn ex${k === D.idx && !D.custom ? " on" : ""}" data-k="${k}">${esc(e.name)}</button>`).join("");
+  $("duel-buttons").querySelectorAll("button").forEach(b => b.onclick = () => { D.idx = +b.dataset.k; D.custom = null; duelButtons(); loadDuel(true); });
+}
+async function loadDuel(autoplay) {
+  stopDuel();
+  const text = D.custom || B.duel_examples[D.idx].text;
+  const d = await post("/api/duel", {text});
+  if (d.error) { $("lanes").innerHTML = `<div class="err">${esc(d.error)}</div>`; return; }
+  D.data = d; resetDuel();
+  if (autoplay) playDuel();
+}
+function resetDuel() {
+  const d = D.data; D.shown = 0;
+  const tp = d.target_product;
+  $("d-ref").innerHTML = (d.reference === "gold"
+      ? `Target (from this example's hand-written gold filters): `
+      : `Your own request has no gold answer, so the reference is <b>Prescient's answer after the full sentence</b>: `) +
+    (tp ? `<b>${esc(tp.title)}</b> · size ${esc(tp.size || "–")} · ${rupees(tp.price)} · <span class="num">${esc(d.target)}</span>` : "<b>none</b>") +
+    ` &nbsp;·&nbsp; Eager = the "Eager (no safety gate)" row of the ablation table.`;
+  $("lanes").innerHTML = d.lanes.map(l => `
+    <div class="lane" id="ln-${l.key}">
+      <div><h5>${esc(l.name)}</h5><div class="r">${esc(l.rule)}</div></div>
+      <div class="ws">${d.words.map((w, i) => `<span class="w" id="ln-${l.key}-${i}">${esc(w)}</span>`).join("")}</div>
+      <div class="status"><div class="s1 idle" id="ln-${l.key}-s1">Listening…</div><div class="s2" id="ln-${l.key}-s2"></div><div id="ln-${l.key}-tag"></div></div>
+    </div>`).join("");
+  $("scores").innerHTML = "";
+  $("d-play").innerHTML = "&#9654;&nbsp; Play";
+}
+function duelNext() {
+  const d = D.data; if (!d || D.shown >= d.words.length) return false;
+  const i = D.shown, last = i === d.words.length - 1;
+  for (const l of d.lanes) {
+    const s = l.steps[i], el = $(`ln-${l.key}-${i}`), lane = $("ln-" + l.key);
+    document.querySelectorAll(`#ln-${l.key} .w.now`).forEach(e => e.classList.remove("now"));
+    el.classList.add("heard", "now");
+    const s1 = $(`ln-${l.key}-s1`), s2 = $(`ln-${l.key}-s2`);
+    if (s.new) {
+      if (s.wrong) {
+        el.classList.add("wrongc");
+        lane.classList.remove("flash"); void lane.offsetWidth; lane.classList.add("flash", "bad");
+        s1.className = "s1 bad"; s1.textContent = "Committed " + s.current;
+        const wp = s.product || {};
+        s2.textContent = wp.title ? `showed ${wp.title}${wp.size ? ", size " + wp.size : ""} — not what the shopper wants` : "not the target";
+        $(`ln-${l.key}-tag`).innerHTML = `<span class="wrongtag">Wrong commit −1.0</span>` +
+          `<div class="s2">showed ${esc(s.current)}${wp.title ? " · " + esc(wp.title) : ""}</div>`;
+      } else {
+        el.classList.add("commit");
+        lane.classList.add("go");
+        s1.className = "s1 go"; s1.textContent = "Committed " + s.current;
+        const hadWrong = l.steps.slice(0, i).some(x => x.wrong);
+        s2.textContent = hadWrong ? `at word ${i + 1} · too late: the wrong commit already cost −1.0, no earliness credit`
+                                  : `at word ${i + 1} · ${plural(d.words.length - i - 1, "word")} before the full stop`;
+      }
+    } else if (!s.current) {
+      s1.className = "s1 idle"; s1.textContent = l.key === "baseline" ? "Waiting for the full stop" : "Waiting";
+      s2.textContent = s.left != null ? `${s.left} left · confidence ${pct(s.confidence)}` : "";
+    }
+  }
+  D.shown++;
+  if (last) duelEnd();
+  return true;
+}
+function duelEnd() {
+  const d = D.data;
+  stopDuel(); $("d-play").innerHTML = "&#8635;&nbsp; Replay";
+  document.querySelectorAll("#lanes .w.now").forEach(e => e.classList.remove("now"));
+  const best = Math.max(...d.lanes.map(l => l.score));
+  for (const l of d.lanes) {
+    if (l.key === "baseline" || !l.commits.length) {
+      const s1 = $(`ln-${l.key}-s1`);
+      s1.className = "s1 " + (l.correct ? "" : "bad");
+      s1.textContent = l.final ? "Answer " + l.final : "No answer";
+      $(`ln-${l.key}-s2`).textContent = "at the full stop · 0 words early";
+    }
+  }
+  $("scores").innerHTML = d.lanes.map(l => `
+    <div class="sc ${l.score === best && l.correct && !l.wrong_commits ? "win" : ""}">
+      <div class="k">${esc(l.name)} · score for this request</div>
+      <div class="bigv">${l.score >= 0 ? "+" : "−"}${Math.abs(l.score).toFixed(2)}</div>
+      <div class="d">Final answer ${l.correct ? `<span class="ok">✓ right</span>` : `<span class="bad">✗ wrong</span>`} (${esc(l.final || "none")})<br>
+        Wrong commits: <span class="${l.wrong_commits ? "bad" : ""}">${l.wrong_commits}</span>${l.wrong_commits ? ` (−${l.wrong_commits.toFixed(1)})` : ""}
+        · earliness ${Math.round(l.early_share * 100)}% · ${plural(l.searches, "search")}</div>
+    </div>`).join("");
+  document.querySelectorAll("#scores .sc").forEach((e, k) => setTimeout(() => e.classList.add("in"), 60 * k));
+}
+function playDuel() {
+  if (!D.data) return;
+  if (D.shown >= D.data.words.length) resetDuel();
+  $("d-play").innerHTML = "&#10073;&#10073;&nbsp; Pause";
+  duelNext();
+  D.timer = setInterval(() => { if (!duelNext()) stopDuel(); }, +$("d-speed").value);
+}
+function stopDuel() { clearInterval(D.timer); D.timer = null; if (D.data && D.shown < D.data.words.length) $("d-play").innerHTML = "&#9654;&nbsp; Play"; }
+$("d-play").onclick = () => D.timer ? stopDuel() : playDuel();
+$("d-next").onclick = () => { stopDuel(); if (D.data && D.shown >= D.data.words.length) resetDuel(); duelNext(); };
+$("d-reset").onclick = () => { stopDuel(); if (D.data) resetDuel(); };
+$("d-speed").oninput = () => { speedLabel($("d-speed"), $("d-speedv")); if (D.timer) { clearInterval(D.timer); D.timer = setInterval(() => { if (!duelNext()) stopDuel(); }, +$("d-speed").value); } };
+$("d-own").addEventListener("keydown", e => { if (e.key === "Enter" && $("d-own").value.trim()) { D.custom = $("d-own").value.trim(); duelButtons(); loadDuel(true); } });
+
+/* ============================== RESULTS ============================== */
+let RESULTS_LOADED = false;
+async function loadResults() {
+  if (RESULTS_LOADED) return; RESULTS_LOADED = true;
+  const r = await fetch("/api/results").then(x => x.json());
+  const p = r.dev.prescient, b = r.dev.baseline, h = r.holdout, e = r.dev_eager;
+  if (!p || !b) { $("hero").innerHTML = `<div class="err">results/strategies.csv not found: run python3 compare.py --strategies</div>`; return; }
+  $("hero").innerHTML = `
+    <div class="hcard main"><div class="k">Score on dev · 300 requests</div><div class="v">${p.score}<small>vs ${b.score} for the organisers' baseline</small></div>
+      <div class="d">scored by the organisers' evaluate.py</div></div>
+    <div class="hcard"><div class="k">Accuracy</div><div class="v">${Math.round(p.accuracy * 100)}%</div><div class="d">final answer right (baseline ${Math.round(b.accuracy * 1000) / 10}%)</div></div>
+    <div class="hcard"><div class="k">Wrong commits</div><div class="v">${p.wrong_commits}</div><div class="d">${e ? `Eager makes ${e.wrong_commits} on the same 300` : "on dev"}</div></div>
+    <div class="hcard"><div class="k">Searches / request</div><div class="v">${p.searches_per_request}</div><div class="d">shown ${p.earliness_pct}% of the request early</div></div>`;
+  $("honest").innerHTML = h.prescient
+    ? `<b>Honest check on new wording.</b> Frozen 250-request holdout, run once and never used for fixes: score <b>${h.prescient.score}</b> vs ${h.baseline ? h.baseline.score : "–"} baseline, accuracy <b>${Math.round(h.prescient.accuracy * 1000) / 10}%</b>, <b>${h.prescient.wrong_commits}</b> wrong commits${h.eager ? ` (Eager: ${h.eager.wrong_commits})` : ""}. Source: results/ablation.csv.`
+    : "Holdout numbers: run python3 compare.py to make results/ablation.csv.";
+  const rows = r.strategies, max = Math.max(...rows.map(x => +x.score));
+  $("st-table").innerHTML = `<tr><th>Strategy</th><th style="width:22%"></th><th class="n">Score</th><th class="n">Accuracy</th><th class="n">Wrong</th><th class="n">Early %</th></tr>` +
+    rows.map(x => `<tr class="${x.strategy.includes("prescient") ? "me" : ""}"><td>${esc(x.strategy.replace(/^\d+\s*/, ""))}</td>
+      <td><div class="sbar" style="width:${100 * (+x.score) / max}%"></div></td><td class="n">${x.score}</td>
+      <td class="n">${(+x.accuracy).toFixed(3)}</td><td class="n ${+x.wrong_commits ? "bad" : ""}">${x.wrong_commits}</td><td class="n">${x.earliness_pct}</td></tr>`).join("");
+  if (r.has_svg) $("svg").src = "/results/speed_safety.svg";
 }
 
-$("play").onclick = async () => {
-  if (timer) { clearInterval(timer); timer = null; $("play").innerHTML = "&#9654; Play"; return; }
-  if (!(await load())) return;
-  if (pos >= data.steps.length) reset();
-  $("play").innerHTML = "&#10073;&#10073; Pause";
-  stepOnce();
-  timer = setInterval(stepOnce, +$("speed").value);
-};
-$("step").onclick = async () => { if (await load()) { if (pos >= data.steps.length) reset(); stepOnce(); } };
-$("all").onclick = async () => { if (await load()) { reset(); while (pos < data.steps.length) stepOnce(); } };
-$("speed").oninput = () => {
-  $("speedv").textContent = (+$("speed").value / 1000).toFixed(2) + " s/word";
-  if (timer) { clearInterval(timer); timer = setInterval(stepOnce, +$("speed").value); }
-};
-$("text").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("play").click(); } });
-$("text").addEventListener("input", () => { if (timer) { clearInterval(timer); timer = null; } $("play").innerHTML = "&#9654; Play"; });
-for (const [name, text] of EXAMPLES) {
-  const b = document.createElement("button"); b.className = "ex"; b.textContent = name;
-  b.onclick = () => { $("text").value = text; $("play").click(); };
-  $("examples").appendChild(b);
+/* ============================== tabs + keys ============================== */
+let MODE = "examples";
+function setMode(m, noLoad) {
+  MODE = m;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.v === m));
+  $("v-single").classList.toggle("on", m === "live" || m === "examples");
+  $("v-duel").classList.toggle("on", m === "duel");
+  $("v-results").classList.toggle("on", m === "results");
+  $("bar-examples").style.display = m === "examples" ? "" : "none";
+  $("bar-live").style.display = m === "live" ? "" : "none";
+  stopEx(); stopDuel();
+  if (m === "examples" && !noLoad) { if (EX.data) resetView(EX.data.words); else loadExample(false); }
+  if (m === "live") { $("live-in").value = ""; LIVE.sid = null; LIVE.sent = []; LIVE.finished = false; resetView([]); setTimeout(() => $("live-in").focus(), 50); }
+  if (m === "duel" && !D.data && !noLoad) loadDuel(false);
+  if (m === "results") loadResults();
 }
-$("text").value = EXAMPLES[0][1];
-$("speed").oninput(); buildSlots();
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => setMode(b.dataset.v));
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (["1","2","3","4"].includes(e.key)) setMode(["live","examples","duel","results"][+e.key - 1]);
+  if (e.key === " " || e.key === "ArrowRight") {
+    e.preventDefault();
+    if (MODE === "examples") (e.key === " " ? $("play") : $("next")).click();
+    if (MODE === "duel") (e.key === " " ? $("d-play") : $("d-next")).click();
+  }
+});
+
+$("thr-t").textContent = pct(B.threshold);
+$("thr").style.left = pct(B.threshold); $("thr").querySelector("b").textContent = pct(B.threshold);
+$("fcat").textContent = B.catalogue;
+speedLabel($("speed"), $("speedv")); speedLabel($("d-speed"), $("d-speedv"));
+exButtons(); duelButtons(); buildChips();
+// Optional deep links (handy for recording): #live  #examples/1  #examples/1/play  #duel/0/play  #results
+(async () => {
+  const [m, k, act] = location.hash.replace("#", "").split("/");
+  const mode = ["live", "examples", "duel", "results"].includes(m) ? m : "examples";
+  if (mode === "examples" && k != null) { EX.idx = Math.min(+k || 0, B.examples.length - 1); exButtons(); }
+  if (mode === "duel" && k != null) { D.idx = Math.min(+k || 0, B.duel_examples.length - 1); duelButtons(); }
+  setMode(mode, act === "play");
+  if (act === "play") {
+    if (mode === "examples") await loadExample(true);
+    if (mode === "duel") await loadDuel(true);
+  }
+})();
 </script>
 </body></html>
 """
@@ -560,6 +1352,9 @@ def main():
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     args = ap.parse_args()
+    missing = [e["name"] for e in DUEL_EXAMPLES if not e["target"]]
+    if missing:
+        print(f"note: duel example(s) without a unique gold product: {', '.join(missing)}")
     server = None
     for port in range(args.port, args.port + 20):     # skip ports already in use
         try:
@@ -570,7 +1365,7 @@ def main():
     if server is None:
         raise SystemExit(f"No free port between {args.port} and {args.port + 19}.")
     url = f"http://127.0.0.1:{server.server_address[1]}"
-    print(f"Demo running at {url}   (press Ctrl+C to stop)")
+    print(f"Prescient demo running at {url}   (press Ctrl+C to stop)")
     if not args.no_browser:
         webbrowser.open(url)
     try:
