@@ -21,6 +21,26 @@ commit update while you are still speaking; click **STOP** (or stay silent) for 
 Voice uses the browser's own speech-to-text, which needs internet. The agent itself stays fully
 offline: it only receives finished words, and `evaluate.py` never uses voice.
 
+## Use it as a web API (`api.py`)
+Standard library only. Each session is one real `Agent` from `agent.py` (unchanged), fed exactly as
+`evaluate.py` feeds it: one `/observe` per word, then `/finish`.
+
+```bash
+python3 api.py                                    # http://127.0.0.1:8100
+SID=$(curl -s -X POST localhost:8100/session | python3 -c 'import json,sys; print(json.load(sys.stdin)["session"])')
+for w in black Loomsy sneakers size 9 for office; do
+  curl -s -X POST localhost:8100/observe -d "{\"session\":\"$SID\",\"word\":\"$w\"}"; echo
+done                                              # word 6 ("for") returns "commit": "P0113"
+curl -s -X POST localhost:8100/finish -d "{\"session\":\"$SID\"}"   # {"final": "P0113", ...}
+```
+
+`/observe` returns the agent's `filters`, `confidence` and `commit` (null if it did not commit
+on this word), plus the product's catalogue row. Latency, measured over HTTP on all 300 dev requests
+(`python3 tests/bench_api.py` → [`results/api_latency.md`](results/api_latency.md)): **0.30 ms per
+`/observe`** (p95 0.68 ms), 0.26 ms per `/finish`, 3.4 ms per `/session` (a new agent reads the
+catalogue's vocabulary). Through the API the dev score is the same 45.9, with the same answer,
+commits and searches on every request.
+
 ## The problem, in one sentence
 A shopper speaks a request one word at a time, and the agent must show the right product
 **before they finish**, without ever showing a wrong one.
@@ -52,7 +72,7 @@ always the safer mistake.
 
 Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (one page) and [`docs/DETAILS.md`](docs/DETAILS.md). Live demo: `python3 demo_app.py`.
 
-## Results (v4)
+## Results (v5)
 
 | Set | Requests | Status | Score | Accuracy | Wrong commits | Earliness (best possible) |
 |---|---|---|---|---|---|---|
@@ -61,10 +81,17 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (one page) and [`docs/DE
 | Cross-validation (5-fold on dev) | 300 | settings picked on 4/5, scored on 1/5 | 45.9 ± 1.0 | — | 0 on every fold | — |
 | Stress | 150 | ⚠ **used for fixes**, not independent | 44.0 | 1.000 | 0 | 6.6 % (11.3 %) |
 | Blind | 100 | ⚠ **used for fixes**, not independent | 39.0 | 0.940 | 0 | 2.5 % (8.4 %) |
-| **Holdout** | 250 | frozen, run once, never used for fixes | **37.6** (baseline 21.2) | 0.980 | 13 | 6.2 % (11.3 %) |
+| **Holdout** | 250 | frozen, run once per version, never used for fixes | **37.6** (baseline 21.2) | 0.980 | 13 | 6.2 % (11.3 %) |
+| **Holdout 2** | 200 | frozen, new wording, run once on v5, never used for fixes | **45.3** (baseline 17.4) | 0.995 | 3 | 11.9 % (19.9 %) |
 
-The holdout is our most honest estimate for new wording. Its failures are analysed in
-[`results/holdout_report.md`](results/holdout_report.md). Searches per request: 1.03 on dev, 1.08 on holdout.
+The two holdouts are our most honest estimates for new wording. Holdout 1's failures are analysed in
+[`results/holdout_report.md`](results/holdout_report.md). Searches per request: 1.03 on dev, 1.08 on both holdouts.
+
+**v5 = v4 + broader vocabulary** (Hindi plural colour forms like "kaale", "sufaid", "mehroon"; everyday
+category names like "flip-flop", "tee shirt", "windcheater", "earbuds", "card holder"; "army green" and
+"off-white" kept as two-colour sets). Dev, stress, blind and holdout 1 are unchanged; on holdout 2, frozen v4
+scores 45.1 / 0.990 and v5 scores 45.3 / 0.995 (3 wrong commits each). A rejected experiment (instant commit on a
+brand word) is described in [`results/ablation.md`](results/ablation.md).
 
 ![Speed vs safety](results/speed_safety.svg)
 
@@ -80,7 +107,7 @@ The holdout is our most honest estimate for new wording. Its failures are analys
 | Prescient − instant category/price commits | 44.4 | 0 | 36.5 | 10 |
 | Prescient − closing-word rule | 46.1 | 0 | 34.4 | 22 |
 | Prescient safe mode (no instant commits, 2 neutral words) | 41.7 | 0 | 37.6 | 5 |
-| **Prescient v4 (full)** | **45.9** | **0** | **37.6** | **13** |
+| **Prescient v5 (full)** | **45.9** | **0** | **37.6** | **13** |
 
 Every safety rule pays for itself on wording we never tuned on. The closing-word rule even
 looks slightly harmful on dev, yet it prevents 9 wrong commits on the holdout.
@@ -126,6 +153,7 @@ looks slightly harmful on dev, yet it prevents 9 wrong commits on the holdout.
 | Stress | `python3 evaluate.py --agent agent.py --data tests/stress.jsonl` (the set is rebuilt, identically, by `python3 tests/stress_test.py`) |
 | Blind | `python3 evaluate.py --agent agent.py --data tests/blind.jsonl` |
 | Holdout (check it is unchanged first) | `python3 tests/make_holdout.py --check`, then `python3 evaluate.py --agent agent.py --data tests/holdout.jsonl` |
+| Holdout 2 (check it is unchanged first) | `python3 tests/make_holdout2.py --check`, then `python3 evaluate.py --agent agent.py --data tests/holdout2.jsonl` |
 | Ablation table and speed–safety chart | `python3 compare.py` → `results/ablation.{md,csv}`, `results/speed_safety.svg` |
 | Search-limit table | `python3 -c "import json,agent as A,evaluate as E; A.CONFIG['max_searches']=1; print(E.summarise(E.run(A.Agent,[json.loads(l) for l in open('dev.jsonl')])[0]))"` (change 1 to 2 or 3, and `dev.jsonl` to `tests/holdout.jsonl`) |
 
@@ -133,9 +161,9 @@ Latency was measured on a MacBook Air (M4, 16 GB), Python 3.14.6: about 0.05 ms 
 (p95 about 0.43 ms), timed around each `observe()` call, searches included.
 
 ## Files
-`agent.py` (the agent; all settings in `CONFIG`) · `tune.py` · `compare.py` · `demo_app.py` ·
+`agent.py` (the agent; all settings in `CONFIG`) · `api.py` (JSON web API) · `tune.py` · `compare.py` · `demo_app.py` ·
 `docs/ARCHITECTURE.md` · `docs/DETAILS.md` · `docs/FINALS_QA.md` ·
-`tests/` (stress, blind, frozen holdout and their generators) · `results/` (tables, chart, holdout report;
+`tests/` (stress, blind, two frozen holdouts and their generators) · `results/` (tables, chart, holdout report;
 per-request logs in `results/logs/`) · `dev_results.jsonl` (submitted dev log).
 
 Organisers' starter kit (unchanged): `evaluate.py` · `search.py` · `catalogue.csv` · `dev.jsonl` ·

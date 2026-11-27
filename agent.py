@@ -63,13 +63,20 @@ COLOURS = {
     "yellow": "yellow", "peela": "yellow", "peeli": "yellow", "pila": "yellow",
     "gold": "gold", "golden": "gold", "sunehra": "gold",
     "silver": "silver", "chandi": "silver",
+    # v5 vocabulary: Hindi plural/oblique forms ("kaale joote") and common Indian spellings
+    "kaale": "black", "neele": "blue", "peele": "yellow", "bhure": "brown",
+    "sufaid": "white", "mehroon": "maroon", "sunehri": "gold", "ash": "grey",
 }
+# One word that names a shade between two catalogue colours: kept as a set (rule 1),
+# exactly like the two-word "off white" below.
+COLOUR_SETS = {"off-white": {"white", "beige"}, "offwhite": {"white", "beige"}}
 # "navy blue" -> navy, "olive green" -> olive: the second word must not overwrite.
 COLOUR_COMPOUNDS = {("navy", "blue"), ("olive", "green"), ("dark", "blue"), ("light", "blue"),
                     ("sky", "blue"), ("off", "white"), ("dark", "green"), ("light", "grey"),
-                    ("dark", "grey"), ("light", "gray"), ("dark", "gray")}
+                    ("dark", "grey"), ("light", "gray"), ("dark", "gray"), ("army", "green")}
 COLOUR_MODIFIED = {("dark", "blue"): {"navy", "blue"}, ("off", "white"): {"white", "beige"},
-                   ("dark", "green"): {"green", "olive"}}
+                   ("dark", "green"): {"green", "olive"},
+                   ("army", "green"): {"green", "olive"}}      # v5: was read as plain green
 
 # Single words that name a category on their own.
 CATEGORY_WORDS = {
@@ -100,11 +107,26 @@ CATEGORY_WORDS = {
     "watch": "watches", "watches": "watches", "wristwatch": "watches",
     "wristwatches": "watches", "ghadi": "watches",
     "wallet": "wallets", "wallets": "wallets", "purse": "wallets",
+    # v5 vocabulary: everyday Indian-English / Hinglish names, one meaning each
+    "flipflop": "sandals", "flip-flop": "sandals", "flop": "sandals", "slipper": "sandals",
+    "slide": "sandals", "sandle": "sandals", "sandles": "sandals",
+    "teeshirt": "t-shirts", "teeshirts": "t-shirts", "tee-shirt": "t-shirts",
+    "tee-shirts": "t-shirts",
+    "frocks": "dresses",
+    "kurtha": "kurtas", "kurthas": "kurtas",
+    "bomber": "jackets", "puffer": "jackets", "windbreaker": "jackets",
+    "windbreakers": "jackets", "windcheaters": "jackets", "raincoat": "jackets",
+    "sweatpants": "track pants", "sweatpant": "track pants",
+    "daypack": "backpacks", "daypacks": "backpacks", "bagpacks": "backpacks",
+    "hats": "caps", "snapback": "caps", "snapbacks": "caps",
+    "earphone": "headphones", "earbuds": "headphones", "earbud": "headphones",
+    "smartwatch": "watches", "smartwatches": "watches",
+    "purses": "wallets", "batua": "wallets", "cardholder": "wallets", "cardholders": "wallets",
 }
 SHOE_WORDS = {"shoes", "shoe", "trainers", "joote", "jootey", "juta", "jute"}
 RUNNING_HINTS = {"running", "jogging", "run", "sports", "sport", "training",
                  "daudne", "daudna", "daudane"}          # Hinglish: "daudne wale joote"
-CASUAL_HINTS = {"casual", "everyday", "lifestyle"}
+CASUAL_HINTS = {"casual", "everyday", "lifestyle", "canvas"}      # "canvas shoes" = sneakers
 
 LETTER_SIZES = {"xs": "XS", "s": "S", "m": "M", "l": "L", "xl": "XL", "xxl": "XXL",
                 "2xl": "XXL", "small": "S", "medium": "M", "large": "L"}
@@ -373,7 +395,7 @@ class FilterState:
             return False
         if tok in PRICE_PREFIX or tok in SIZE_PREFIX or tok in PRICE_CONNECT - {"for", "my", "a", "the", "is"}:
             return False
-        if tok in COLOURS or tok in LETTER_SIZES or tok in {"extra", "double"}:
+        if tok in COLOURS or tok in COLOUR_SETS or tok in LETTER_SIZES or tok in {"extra", "double"}:
             return False
         if self.number is not None or self.pending_bare is not None:
             return False
@@ -470,6 +492,9 @@ class FilterState:
         self.size_modifier = None
 
         # 6. Colours.
+        if tok in COLOUR_SETS:
+            self._set("colour", frozenset(COLOUR_SETS[tok]))
+            return
         if tok in COLOURS:
             if prev is not None and (prev, tok) in COLOUR_COMPOUNDS:
                 if (prev, tok) in COLOUR_MODIFIED:
@@ -529,7 +554,7 @@ class FilterState:
             return True
         if not 4 <= len(tok) <= 5 or not raw_word.strip(PUNCT)[:1].isupper():
             return False
-        return not (tok in COLOURS or tok in CATEGORY_WORDS or tok in SHOE_WORDS
+        return not (tok in COLOURS or tok in COLOUR_SETS or tok in CATEGORY_WORDS or tok in SHOE_WORDS
                     or tok in LETTER_SIZES)
 
     def _category(self, tok, prev):
@@ -540,8 +565,10 @@ class FilterState:
             if recent & CASUAL_HINTS:
                 return {"sneakers"}
             return {"running shoes", "sneakers"}
-        if tok in {"shirt", "shirts"} and prev == "t":
-            return {"t-shirts"}
+        if tok in {"shirt", "shirts"} and prev in {"t", "tee"}:
+            return {"t-shirts"}                  # "tee shirt" (v5: was read as shirts)
+        if tok in {"holder", "holders"} and prev == "card":
+            return {"wallets"}                   # "card holder" (v5)
         if tok in {"pack", "packs"} and prev in {"bag", "back"}:
             return {"backpacks"}
         if tok in {"pants", "pant"} and prev == "track":

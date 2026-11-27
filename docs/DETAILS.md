@@ -1,4 +1,4 @@
-# Prescient — design details (v4)
+# Prescient — design details (v5)
 
 The one-page summary is `docs/ARCHITECTURE.md`. This file holds the detail that was moved out of it.
 
@@ -47,8 +47,25 @@ come *after* the request sounded finished: all 13 wrong commits, and the right p
 still the final answer every time; and (2) misspelled colours ("blie", "gey"): 4 of its 5
 wrong answers. Full report: `results/holdout_report.md`.
 
+**Holdout 2 (v5).** A second frozen set (`tests/holdout2.jsonl`, 200 requests, seed 20261127, new
+Indian-shopper wording) was run once on v5: **45.3**, accuracy **0.995**, **3** wrong commits, all 3
+in corrections spoken at the very end ("…sorry, I meant beige"); the right product was still the final
+answer in each. Its one wrong answer is a request tagged correction, late constraint and typo. Frozen v4 on the same
+set: 45.1 / 0.990 / 3.
+
+## v5: vocabulary, and one rejected experiment
+- **v5 vocabulary** (accepted): Hindi plural/oblique colours ("kaale", "neele", "sufaid", "mehroon"),
+  everyday category names ("flip-flop", "slipper", "tee shirt", "windcheater", "sweatpants", "earbuds",
+  "smartwatch", "card holder", "batua"), "canvas shoes" → sneakers, and "army green" / "off-white" as
+  two-colour sets (rule 1). Dev 45.9 / 1.000 / 0, stress 44.0 / 1.000 / 0, blind 39.0 / 0.940 / 0,
+  cross-validated 45.9 ± 1.0, holdout 37.6 / 0.980 / 13: all identical to v4.
+- **Instant commit on a brand word** (rejected): adding `brand` to `instant_slots` raised
+  cross-validation from 45.9 ± 1.0 to 46.4 ± 0.4 (+0.5) and dev to 46.4, but made **1 wrong commit on
+  dev** (dev-0292 committed P0506 on word 7; the target was P0505). Our rule is 0 wrong commits on dev,
+  whatever the score, so it was not kept.
+
 ## What each part is worth
-`compare.py` → `results/ablation.md`, one part removed per row (measured on v3; v4 gives
+`compare.py` → `results/ablation.md`, one part removed per row (measured on v3; v4 and v5 give
 identical results).
 
 | Variant | Dev score / wrong | Holdout score / wrong |
@@ -58,11 +75,11 @@ identical results).
 | − closing-word rule | 46.1 / 0 | 34.4 / 22 |
 | − instant category/price commits | 44.4 / 0 | 36.5 / 10 |
 | Safe mode (no instant commits, 2 neutral words) | 41.7 / 0 | 37.6 / 5 |
-| **Prescient v4 (full)** | **45.9 / 0** | **37.6 / 13** |
+| **Prescient v5 (full)** | **45.9 / 0** | **37.6 / 13** |
 
 Speed is about 0.05 ms per word, searches included (MacBook Air M4, Python 3.14).
 
 ## Files
 `agent.py` (the agent; settings in `CONFIG`) · `tune.py`
 (correction chances, cross-validation) · `compare.py` (ablation) · `demo_app.py` (live
-word-by-word demo) · `tests/` (stress, blind, frozen holdout).
+word-by-word demo) · `tests/` (stress, blind, two frozen holdouts).

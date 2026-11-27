@@ -90,7 +90,7 @@ at the end and is trusted only if it leaves exactly one product. Note: v3's fixe
 blind failures, so 94 % is not an independent number.
 
 **11. Are your tests independent?**
-Only the holdout.
+Only the two holdouts.
 - **Dev** is official but we tuned on it. **5-fold cross-validation** (45.9 ± 1.0, 0 wrong commits
   on every fold) shows the settings are not fitted to particular requests.
 - **Stress** and **blind** were written from the catalogue without looking at the agent, but we
@@ -99,6 +99,9 @@ Only the holdout.
   recorded SHA-256, was run once, and no fix was made from it: 37.6, accuracy 0.980,
   13 wrong commits. Caveat: we wrote its generator, so its sentence styles are ours, and it has
   twice dev's share of corrections (36 % against 18 %).
+- **Holdout 2** (200 requests, v5) is a second frozen set with new Indian-shopper wording (Hinglish,
+  synonyms like "lowers" and "frock", typos, ₹/k/word prices). Run once on v5: **45.3**, accuracy
+  **0.995**, **3** wrong commits (all from corrections at the very end). Same caveat: we wrote it.
 
 **12. Isn't this just hard-coded rules?**
 The vocabulary is hand-built, yes, but the decisions rest on one guarantee and on measured
@@ -115,3 +118,8 @@ The weakness is vocabulary coverage: new synonyms and typos need adding.
   Python 3.14. All 300 dev requests run in 0.22 s.
 - **Cost:** no API calls, no model, no GPU, standard library only. The cost is CPU time,
   under 1 ms per request (about 13 words), plus about 1 catalogue search.
+
+**14. Why not commit the moment a brand is said, like a category?**
+We tried it (v5 experiment). Cross-validated score went up by 0.5 (45.9 → 46.4), but it made
+1 wrong commit on dev (dev-0292). Our rule is zero wrong commits on dev, whatever the score,
+because a wrong commit costs −1.0, more than any earliness gain. So we rejected it.

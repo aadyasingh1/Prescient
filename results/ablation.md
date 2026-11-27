@@ -44,3 +44,21 @@ Made by `python3 compare.py`. `agent.py` was not edited: each row changes one se
 - **v3 (full)**: `agent.py` exactly as it is.
 
 Chart: `results/speed_safety.svg` (earliness on x, wrong commits on y).
+
+The tables above were measured on v3. v4 and v5 give identical numbers on dev and holdout.
+
+## v5 experiments (2026-11-27)
+
+Measured in memory (one `CONFIG` change per run, `agent.py` not edited) with `evaluate.run()` and `tune.py`.
+
+| Variant | Dev score | Dev accuracy | Dev wrong | Dev earliness % | 5-fold CV | Decision |
+|---|---:|---:|---:|---:|---|---|
+| v4 | 45.9 | 1.000 | 0 | 10.0 | 45.9 ± 1.0 | — |
+| v5 = v4 + broader vocabulary | 45.9 | 1.000 | 0 | 10.0 | 45.9 ± 1.0 | **kept** |
+| v5 + instant commit on brand word (`instant_slots` += brand) | 46.4 | 1.000 | **1** | 11.3 | 46.4 ± 0.4 (fold 0: 1 wrong) | **rejected** |
+
+- The brand experiment gains +0.5 cross-validated, but dev-0292 commits P0506 on word 7 (target P0505).
+  The project rule is 0 wrong commits on dev regardless of score, so it was rejected. It was not run on
+  either holdout.
+- v5 on the other sets: stress 44.0 / 1.000 / 0, blind 39.0 / 0.940 / 0, holdout 37.6 / 0.980 / 13 (all
+  identical to v4). Holdout 2 (200, new, run once): v5 **45.3 / 0.995 / 3**; frozen v4 45.1 / 0.990 / 3.
